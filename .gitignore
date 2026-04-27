@@ -1,0 +1,14 @@
+node_modules/
+dist/
+build/
+.env
+.env.local
+.DS_Store
+*.log
+.vite/
+coverage/
+node_modules/ 
+vendor/ 
+.env 
+uploads/ 
+storage/ 
