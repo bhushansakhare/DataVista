@@ -7,7 +7,7 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
 } from 'recharts';
 import {
-  PALETTE, aggregate, buildScatter, buildTreemap, buildFunnel, buildHeatmap, buildWaterfall,
+  PALETTE, aggregate, totalsPerMetric, buildScatter, buildTreemap, buildFunnel, buildHeatmap, buildWaterfall,
 } from '../../utils/chartTransform.js';
 import { detectUnit, getFormatter } from '../../utils/formatValue.js';
 
@@ -18,12 +18,17 @@ export default function ChartRenderer({ chart, rows, height = 300 }) {
   const safeRows = Array.isArray(rows) ? rows : [];
   const view = useMemo(() => (chart ? buildView(chart, safeRows) : { data: [] }), [chart, safeRows]);
   // Pick a smart formatter for the value axis based on the Y column name + sample values.
+  // For multi-Y charts, use the first yField as the formatter hint (the axis is shared).
   const fmt = useMemo(() => {
-    if (!chart?.yField) return getFormatter('integer'); // count of rows
-    const sample = safeRows.slice(0, 80).map((r) => r[chart.yField]);
-    const unit = detectUnit(chart.yField, sample);
+    const ys = Array.isArray(chart?.yFields) && chart.yFields.length > 0
+      ? chart.yFields
+      : (chart?.yField ? [chart.yField] : []);
+    if (ys.length === 0) return getFormatter('integer'); // count of rows
+    const primary = ys[0];
+    const sample = safeRows.slice(0, 80).map((r) => r[primary]);
+    const unit = detectUnit(primary, sample);
     return getFormatter(unit);
-  }, [chart?.yField, safeRows]);
+  }, [chart?.yField, chart?.yFields, safeRows]);
 
   if (!chart || !chart.type) {
     return (
@@ -52,6 +57,12 @@ export default function ChartRenderer({ chart, rows, height = 300 }) {
 }
 
 function buildView(chart, rows) {
+  // Multi-Y indicator — used to show one slice/bucket per metric instead of by X.
+  const ys = Array.isArray(chart.yFields) && chart.yFields.length > 0
+    ? chart.yFields
+    : (chart.yField ? [chart.yField] : []);
+  const isMultiY = ys.length >= 2;
+
   switch (chart.type) {
     case 'bar':
     case 'line':
@@ -60,16 +71,34 @@ function buildView(chart, rows) {
     case 'horizontalBar':
       return aggregate(rows, chart);
     case 'donut': {
+      if (isMultiY) {
+        return { data: totalsPerMetric(rows, { yFields: ys, aggregation: chart.aggregation, filters: chart.filters }) };
+      }
       const a = aggregate(rows, chart);
       return { data: a.data?.map((d, i) => ({ name: d.name, value: d.value, fill: PALETTE[i % PALETTE.length] })) || [] };
     }
     case 'radial': {
+      if (isMultiY) {
+        return { data: totalsPerMetric(rows, { yFields: ys, aggregation: chart.aggregation, filters: chart.filters }) };
+      }
       const a = aggregate(rows, chart);
       return { data: a.data?.map((d, i) => ({ name: d.name, value: d.value, fill: PALETTE[i % PALETTE.length] })) || [] };
     }
     case 'scatter': return buildScatter(rows, chart);
-    case 'treemap': return { data: buildTreemap(rows, chart) };
-    case 'funnel': return { data: buildFunnel(rows, chart) };
+    case 'treemap': {
+      if (isMultiY) {
+        const totals = totalsPerMetric(rows, { yFields: ys, aggregation: chart.aggregation, filters: chart.filters });
+        return { data: totals.map((t) => ({ name: t.name, size: t.value })) };
+      }
+      return { data: buildTreemap(rows, chart) };
+    }
+    case 'funnel': {
+      if (isMultiY) {
+        const totals = totalsPerMetric(rows, { yFields: ys, aggregation: chart.aggregation, filters: chart.filters });
+        return { data: totals.sort((a, b) => b.value - a.value) };
+      }
+      return { data: buildFunnel(rows, chart) };
+    }
     case 'heatmap': return buildHeatmap(rows, chart);
     case 'waterfall': return { data: buildWaterfall(rows, chart) };
     default: return { data: [] };

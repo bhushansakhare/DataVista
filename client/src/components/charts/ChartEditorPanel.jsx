@@ -1,9 +1,10 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, Plus, Trash2, Sparkles, Lightbulb } from 'lucide-react';
+import { X, Plus, Trash2, Sparkles } from 'lucide-react';
 import ChartTypePicker from './ChartTypePicker.jsx';
 import ChartRenderer from './ChartRenderer.jsx';
-import { describeChart, explainChart } from '../../utils/chartLabels.js';
+import { describeChart, columnsUsed } from '../../utils/chartLabels.js';
+import { getAxisCandidates } from '../../utils/columnInsights.js';
 
 const FILTER_OPS = [
   { id: 'equals', label: 'equals' },
@@ -29,20 +30,19 @@ export default function ChartEditorPanel({ open, chart, sheet, rows, onSave, onC
   }
 
   // Safe data extraction — never let undefined sheet/columns crash the modal.
-  const types = sheet?.detectedTypes || {};
-  const all = Array.isArray(sheet?.columns) ? sheet.columns : [];
-  const selected = Array.isArray(sheet?.selectedColumns) && sheet.selectedColumns.length
-    ? sheet.selectedColumns
-    : all;
-  const cols = all.filter((c) => selected.includes(c));
-  const numericCols = cols.filter((c) => types[c] === 'number');
+  // URLs are dropped from every axis; IDs are dropped from Y-axis only.
+  const candidates = useMemo(() => getAxisCandidates(sheet), [sheet]);
+  const cols = candidates.xCandidates;
+  const numericCols = candidates.yCandidates;
+  const groupCols = candidates.groupCandidates;
+  const skipped = candidates.excluded;
   const safeRows = Array.isArray(rows) ? rows : [];
 
   // Use draft for rendering, but never assume non-null.
   const view = draft || chart;
   const isPie = view?.type === 'donut' || view?.type === 'radial';
   const labels = describeChart(view || {});
-  const explanation = explainChart(view || {});
+  const usedCols = columnsUsed(view || {});
 
   function set(patch) {
     setDraft((d) => ({ ...(d || chart || {}), ...patch }));
@@ -106,13 +106,23 @@ export default function ChartEditorPanel({ open, chart, sheet, rows, onSave, onC
                 )}
               </div>
 
-              <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-amber-500/5 border border-amber-500/20">
-                <Lightbulb className="w-3.5 h-3.5 text-amber-500 mt-0.5 flex-shrink-0" />
-                <div className="text-[11px] leading-relaxed text-ink-600 dark:text-ink-300">
-                  <span className="font-semibold text-ink-700 dark:text-ink-200">What this chart will show: </span>
-                  {explanation}
+              {usedCols.length > 0 && (
+                <div className="rounded-lg bg-ink-50 dark:bg-ink-800/40 px-3 py-2">
+                  <div className="text-[10px] uppercase tracking-wider font-semibold text-ink-500 mb-1.5">
+                    Columns used
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {usedCols.map((c) => (
+                      <span
+                        key={c}
+                        className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-white dark:bg-ink-900/60 border border-ink-200/60 dark:border-ink-800/60"
+                      >
+                        {c}
+                      </span>
+                    ))}
+                  </div>
                 </div>
-              </div>
+              )}
 
               <div>
                 <label className="label">Chart title</label>
@@ -136,17 +146,21 @@ export default function ChartEditorPanel({ open, chart, sheet, rows, onSave, onC
                   value={view.xField}
                   options={[{ value: '', label: '— pick —' }, ...cols]}
                   onChange={(v) => set({ xField: v })}
+                  hint="Categories or dates — pick what you want to break the data down by."
                 />
                 <Field
                   label={isPie ? 'Value' : 'Y axis'}
                   value={view.yField}
                   options={[{ value: '', label: '— count rows —' }, ...numericCols]}
                   onChange={(v) => set({ yField: v })}
+                  hint={numericCols.length === 0
+                    ? 'No numeric columns detected — chart will count rows.'
+                    : 'Only numeric columns can be plotted as values.'}
                 />
                 <Field
                   label="Group by"
                   value={view.groupBy}
-                  options={[{ value: '', label: '— none —' }, ...cols]}
+                  options={[{ value: '', label: '— none —' }, ...groupCols]}
                   onChange={(v) => set({ groupBy: v })}
                 />
                 <Field
@@ -223,6 +237,18 @@ export default function ChartEditorPanel({ open, chart, sheet, rows, onSave, onC
                   )}
                 </div>
               </div>
+
+              {(skipped.urls.length > 0 || skipped.ids.length > 0) && (
+                <div className="rounded-lg bg-ink-50 dark:bg-ink-800/40 px-3 py-2 text-[11px] text-ink-500 leading-relaxed">
+                  <span className="font-semibold text-ink-700 dark:text-ink-200">Hidden from axes: </span>
+                  {skipped.urls.length > 0 && (
+                    <>URL columns ({skipped.urls.join(', ')}){skipped.ids.length > 0 ? ' · ' : ''}</>
+                  )}
+                  {skipped.ids.length > 0 && (
+                    <>ID columns ({skipped.ids.join(', ')}) skipped from Y-axis</>
+                  )}
+                </div>
+              )}
             </div>
 
             <div className="px-5 py-4 border-t border-ink-200/60 dark:border-ink-800/60 flex items-center gap-2 flex-shrink-0">
@@ -238,7 +264,7 @@ export default function ChartEditorPanel({ open, chart, sheet, rows, onSave, onC
   );
 }
 
-function Field({ label, value, options, onChange }) {
+function Field({ label, value, options, onChange, hint }) {
   const opts = options.map((o) => (typeof o === 'string' ? { value: o, label: o } : o));
   return (
     <div>
@@ -246,6 +272,7 @@ function Field({ label, value, options, onChange }) {
       <select value={value || ''} onChange={(e) => onChange(e.target.value)} className="input mt-1.5">
         {opts.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
       </select>
+      {hint && <p className="text-[10px] text-ink-500 mt-1 leading-snug">{hint}</p>}
     </div>
   );
 }

@@ -26,9 +26,64 @@ export async function fetchCsv(sheetKey, gid = '0') {
   return data;
 }
 
+// Matches "120:15:14", "1:30", "12:00" — duration written as HH:MM:SS or MM:SS.
+const DURATION_RE = /^\d{1,5}:\d{2}(?::\d{2})?$/;
+// Matches "95k", "1.5M", "2B", "1.2T" — suffixed magnitudes (case-insensitive).
+const SUFFIX_RE = /^(-?\d+(?:[.,]\d+)?)\s*([kKmMbBtT])$/;
+const SUFFIX_MULT = { k: 1e3, K: 1e3, m: 1e6, M: 1e6, b: 1e9, B: 1e9, t: 1e12, T: 1e12 };
+// Matches "120 MB", "1.5GB", "5 KB" — byte units with optional space.
+const BYTE_RE = /^(-?\d+(?:[.,]\d+)?)\s*(B|KB|MB|GB|TB|PB)$/i;
+const BYTE_MULT = { B: 1, KB: 1024, MB: 1048576, GB: 1073741824, TB: 1099511627776, PB: 1125899906842624 };
+// Matches "50%", "12.5 %"
+const PERCENT_RE = /^(-?\d+(?:[.,]\d+)?)\s*%$/;
+// Matches "$50", "€1,200.50", "₹150", "£99.9"
+const CURRENCY_RE = /^([$€£¥₹])\s*(-?[\d,]+(?:\.\d+)?)$/;
+
+function durationToSeconds(s) {
+  const parts = String(s).trim().split(':').map(Number);
+  if (parts.some((n) => !Number.isFinite(n))) return NaN;
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  return NaN;
+}
+
+function suffixedToNumber(s) {
+  const m = String(s).trim().match(SUFFIX_RE);
+  if (!m) return NaN;
+  const n = Number(m[1].replace(',', '.'));
+  if (!Number.isFinite(n)) return NaN;
+  return n * (SUFFIX_MULT[m[2]] || 1);
+}
+
+function bytesFromString(s) {
+  const m = String(s).trim().match(BYTE_RE);
+  if (!m) return NaN;
+  const n = Number(m[1].replace(',', '.'));
+  if (!Number.isFinite(n)) return NaN;
+  return n * (BYTE_MULT[m[2].toUpperCase()] || 1);
+}
+
+function percentFromString(s) {
+  const m = String(s).trim().match(PERCENT_RE);
+  if (!m) return NaN;
+  return Number(m[1].replace(',', '.'));
+}
+
+function currencyFromString(s) {
+  const m = String(s).trim().match(CURRENCY_RE);
+  if (!m) return NaN;
+  return Number(m[2].replace(/,/g, ''));
+}
+
 function isNumeric(v) {
   if (v === null || v === undefined || v === '') return false;
-  const n = Number(String(v).replace(/,/g, ''));
+  const s = String(v).trim();
+  if (DURATION_RE.test(s)) return Number.isFinite(durationToSeconds(s));
+  if (BYTE_RE.test(s)) return Number.isFinite(bytesFromString(s));
+  if (SUFFIX_RE.test(s)) return Number.isFinite(suffixedToNumber(s));
+  if (PERCENT_RE.test(s)) return Number.isFinite(percentFromString(s));
+  if (CURRENCY_RE.test(s)) return Number.isFinite(currencyFromString(s));
+  const n = Number(s.replace(/,/g, ''));
   return Number.isFinite(n);
 }
 
@@ -37,6 +92,8 @@ function isDateLike(v) {
   const s = String(v).trim();
   if (s.length < 4) return false;
   if (/^\d+(\.\d+)?$/.test(s)) return false;
+  // Don't let durations like "120:15:14" leak through as dates
+  if (DURATION_RE.test(s)) return false;
   const t = Date.parse(s);
   return Number.isFinite(t);
 }
@@ -67,7 +124,14 @@ export function coerceRows(rows, types) {
       const v = row[k];
       if (v === null || v === undefined || v === '') { out[k] = null; continue; }
       if (types[k] === 'number') {
-        const n = Number(String(v).replace(/,/g, ''));
+        const s = String(v).trim();
+        let n = NaN;
+        if (DURATION_RE.test(s)) n = durationToSeconds(s);
+        else if (BYTE_RE.test(s)) n = bytesFromString(s);
+        else if (SUFFIX_RE.test(s)) n = suffixedToNumber(s);
+        else if (PERCENT_RE.test(s)) n = percentFromString(s);
+        else if (CURRENCY_RE.test(s)) n = currencyFromString(s);
+        else n = Number(s.replace(/,/g, ''));
         out[k] = Number.isFinite(n) ? n : null;
       } else if (types[k] === 'date') {
         const t = Date.parse(v);

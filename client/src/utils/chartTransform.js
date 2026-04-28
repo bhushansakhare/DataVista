@@ -18,9 +18,74 @@ export const PALETTE = [
   '#eab308', '#22c55e', '#14b8a6', '#06b6d4', '#3b82f6',
 ];
 
+// Regexes mirror the server parser so even if a column wasn't classified as
+// numeric on import, values like "120 MB" / "1.5GB" / "$50" / "120:15:14"
+// still produce a usable number when fed to the chart engine.
+const NUM_DURATION_RE = /^\d{1,5}:\d{2}(?::\d{2})?$/;
+const NUM_BYTE_RE = /^(-?\d+(?:[.,]\d+)?)\s*(B|KB|MB|GB|TB|PB)$/i;
+const NUM_BYTE_MULT = { B: 1, KB: 1024, MB: 1048576, GB: 1073741824, TB: 1099511627776, PB: 1125899906842624 };
+const NUM_SUFFIX_RE = /^(-?\d+(?:[.,]\d+)?)\s*([kKmMbBtT])$/;
+const NUM_SUFFIX_MULT = { k: 1e3, K: 1e3, m: 1e6, M: 1e6, b: 1e9, B: 1e9, t: 1e12, T: 1e12 };
+const NUM_PERCENT_RE = /^(-?\d+(?:[.,]\d+)?)\s*%$/;
+const NUM_CURRENCY_RE = /^([$€£¥₹])\s*(-?[\d,]+(?:\.\d+)?)$/;
+
+/**
+ * Returns true if at least 70% of non-empty sample values from `col` parse as
+ * a number (after unit/duration/currency/percent stripping). Useful when the
+ * server's type detector classified a column as `string` because of unit
+ * suffixes like "120 MB".
+ */
+export function looksNumeric(rows, col) {
+  const sample = rows.slice(0, 80).map((r) => r?.[col]).filter((v) => v !== null && v !== undefined && v !== '');
+  if (sample.length === 0) return false;
+  let hits = 0;
+  for (const v of sample) {
+    if (typeof v === 'number' && Number.isFinite(v)) { hits++; continue; }
+    const s = String(v).trim();
+    if (
+      NUM_DURATION_RE.test(s) ||
+      NUM_BYTE_RE.test(s) ||
+      NUM_SUFFIX_RE.test(s) ||
+      NUM_PERCENT_RE.test(s) ||
+      NUM_CURRENCY_RE.test(s) ||
+      Number.isFinite(Number(s.replace(/,/g, '')))
+    ) {
+      hits++;
+    }
+  }
+  return hits / sample.length >= 0.7;
+}
+
 function num(v) {
   if (v === null || v === undefined) return 0;
-  const n = typeof v === 'number' ? v : Number(String(v).replace(/,/g, ''));
+  if (typeof v === 'number') return Number.isFinite(v) ? v : 0;
+  const s = String(v).trim();
+  if (!s) return 0;
+  if (NUM_DURATION_RE.test(s)) {
+    const parts = s.split(':').map(Number);
+    if (parts.some((n) => !Number.isFinite(n))) return 0;
+    if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+    if (parts.length === 2) return parts[0] * 60 + parts[1];
+    return 0;
+  }
+  let m;
+  if ((m = s.match(NUM_BYTE_RE))) {
+    const n = Number(m[1].replace(',', '.'));
+    return Number.isFinite(n) ? n * (NUM_BYTE_MULT[m[2].toUpperCase()] || 1) : 0;
+  }
+  if ((m = s.match(NUM_SUFFIX_RE))) {
+    const n = Number(m[1].replace(',', '.'));
+    return Number.isFinite(n) ? n * (NUM_SUFFIX_MULT[m[2]] || 1) : 0;
+  }
+  if ((m = s.match(NUM_PERCENT_RE))) {
+    const n = Number(m[1].replace(',', '.'));
+    return Number.isFinite(n) ? n : 0;
+  }
+  if ((m = s.match(NUM_CURRENCY_RE))) {
+    const n = Number(m[2].replace(/,/g, ''));
+    return Number.isFinite(n) ? n : 0;
+  }
+  const n = Number(s.replace(/,/g, ''));
   return Number.isFinite(n) ? n : 0;
 }
 
@@ -59,9 +124,40 @@ function reduce(values, agg) {
   }
 }
 
-export function aggregate(rows, { xField, yField, groupBy, aggregation = 'sum', filters = [] }) {
+export function aggregate(rows, { xField, yField, yFields, groupBy, aggregation = 'sum', filters = [] }) {
   const filtered = applyFilters(rows, filters);
   if (!xField) return { data: [], groups: [] };
+
+  // Multi-Y wins over groupBy. Each yField becomes its own series.
+  const ys = Array.isArray(yFields) && yFields.length > 0
+    ? yFields
+    : (yField ? [yField] : []);
+  const useMultiY = ys.length >= 2;
+
+  if (useMultiY) {
+    const buckets = new Map();
+    for (const r of filtered) {
+      const k = r[xField];
+      if (k === null || k === undefined || k === '') continue;
+      const key = String(k);
+      if (!buckets.has(key)) buckets.set(key, { __x: key, __metrics: {} });
+      const b = buckets.get(key);
+      for (const y of ys) {
+        if (!b.__metrics[y]) b.__metrics[y] = [];
+        b.__metrics[y].push(num(r[y]));
+      }
+    }
+    const data = [];
+    for (const b of buckets.values()) {
+      const out = { name: b.__x };
+      for (const y of ys) {
+        out[y] = reduce(b.__metrics[y] || [], aggregation);
+      }
+      data.push(out);
+    }
+    return { data, groups: [...ys] };
+  }
+
   const buckets = new Map();
   for (const r of filtered) {
     const k = r[xField];
@@ -93,6 +189,23 @@ export function aggregate(rows, { xField, yField, groupBy, aggregation = 'sum', 
     rowsOut.push(out);
   }
   return { data: rowsOut, groups: Array.from(groupSet) };
+}
+
+/**
+ * Total per metric — used by donut/radial/treemap/funnel when the chart has
+ * multiple yFields. Produces one slice per metric with its sum across the
+ * filtered rows.
+ */
+export function totalsPerMetric(rows, { yFields = [], aggregation = 'sum', filters = [] }) {
+  const filtered = applyFilters(rows, filters);
+  return yFields.map((y, i) => {
+    const nums = filtered.map((r) => num(r[y]));
+    return {
+      name: y,
+      value: reduce(nums, aggregation),
+      fill: PALETTE[i % PALETTE.length],
+    };
+  });
 }
 
 export function buildScatter(rows, { xField, yField, groupBy, filters = [] }) {

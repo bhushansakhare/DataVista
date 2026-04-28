@@ -1,8 +1,8 @@
 import { motion, AnimatePresence } from 'framer-motion';
-import { MoreVertical, Pencil, Trash2, ChevronDown, Filter, BarChart2, Lightbulb } from 'lucide-react';
+import { MoreVertical, Pencil, Trash2, ChevronDown, Filter, BarChart2 } from 'lucide-react';
 import { useState } from 'react';
 import ChartRenderer from './ChartRenderer.jsx';
-import { describeChart, explainChart, formatFilter } from '../../utils/chartLabels.js';
+import { describeChart, columnsUsed, formatFilter } from '../../utils/chartLabels.js';
 
 export default function ChartCard({
   chart,
@@ -18,7 +18,7 @@ export default function ChartCard({
   if (!chart) return null;
   const safeRows = Array.isArray(rows) ? rows : [];
   const labels = describeChart(chart);
-  const explanation = explainChart(chart);
+  const usedCols = columnsUsed(chart);
   const filters = Array.isArray(chart.filters) ? chart.filters.filter((f) => f && f.field) : [];
   const hasData = Boolean(chart.xField);
 
@@ -86,12 +86,20 @@ export default function ChartCard({
         )}
       </div>
 
-      {hasData && (
-        <div className="mt-3 flex items-start gap-2 px-3 py-2 rounded-lg bg-amber-500/5 border border-amber-500/20">
-          <Lightbulb className="w-3.5 h-3.5 text-amber-500 mt-0.5 flex-shrink-0" />
-          <div className="text-[11px] leading-relaxed text-ink-600 dark:text-ink-300">
-            <span className="font-semibold text-ink-700 dark:text-ink-200">What this chart shows: </span>
-            {explanation}
+      {hasData && usedCols.length > 0 && (
+        <div className="mt-3 pt-3 border-t border-ink-200/60 dark:border-ink-800/60">
+          <div className="text-[10px] uppercase tracking-wider font-semibold text-ink-500 mb-1.5">
+            Columns used
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {usedCols.map((c) => (
+              <span
+                key={c}
+                className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-ink-100 dark:bg-ink-800/60 text-ink-700 dark:text-ink-200"
+              >
+                {c}
+              </span>
+            ))}
           </div>
         </div>
       )}

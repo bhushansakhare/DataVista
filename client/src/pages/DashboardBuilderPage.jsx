@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { ArrowLeft, Plus, Save, ChevronUp, ChevronDown, Sparkles } from 'lucide-react';
+import { ArrowLeft, Plus, Save, ChevronUp, ChevronDown, Sparkles, Wand2 } from 'lucide-react';
 import api from '../api/client.js';
 import { useToast } from '../context/ToastContext.jsx';
 import ChartCard from '../components/charts/ChartCard.jsx';
 import ChartEditorPanel from '../components/charts/ChartEditorPanel.jsx';
+import SuggestChartsModal from '../components/charts/SuggestChartsModal.jsx';
 import { useSocket, getGlobalSocket } from '../hooks/useSocket.js';
 
 function makeChart(defaults = {}) {
@@ -44,6 +45,7 @@ export default function DashboardBuilderPage() {
   const [dashboard, setDashboard] = useState(null);
   const [editingId, setEditingId] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [suggestOpen, setSuggestOpen] = useState(false);
 
   const isEdit = Boolean(id);
 
@@ -173,6 +175,13 @@ export default function DashboardBuilderPage() {
     });
   }
 
+  function applySuggestions(suggested) {
+    if (!Array.isArray(suggested) || suggested.length === 0) return;
+    console.log('[builder] apply', suggested.length, 'suggested charts');
+    setDashboard((d) => ({ ...d, charts: [...(d.charts || []), ...suggested] }));
+    toast.success(`Added ${suggested.length} suggested chart${suggested.length === 1 ? '' : 's'}`);
+  }
+
   if (!dashboard || !sheet) {
     return (
       <div className="p-10 flex items-center gap-3 text-ink-500">
@@ -193,7 +202,10 @@ export default function DashboardBuilderPage() {
             className="bg-transparent text-2xl font-extrabold focus:outline-none flex-1 min-w-0"
           />
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          <button onClick={() => setSuggestOpen(true)} className="btn-secondary" title="AI-suggested charts">
+            <Wand2 className="w-4 h-4" /> Suggest charts
+          </button>
           <button onClick={addChart} className="btn-secondary"><Plus className="w-4 h-4" /> Add chart</button>
           <button onClick={save} disabled={busy} className="btn-primary disabled:opacity-50">
             <Save className="w-4 h-4" /> {busy ? 'Saving…' : 'Save'}
@@ -246,6 +258,14 @@ export default function DashboardBuilderPage() {
         title={editingChart ? `Edit chart` : 'Edit chart'}
         onSave={(updated) => editingChart && updateChart(editingChart.id, updated)}
         onClose={() => setEditingId(null)}
+      />
+
+      <SuggestChartsModal
+        open={suggestOpen}
+        onClose={() => setSuggestOpen(false)}
+        sheet={sheet}
+        rows={rows}
+        onApply={applySuggestions}
       />
     </div>
   );

@@ -1,11 +1,29 @@
 import { useState, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ChevronDown, FileText, Search, Hash, Type, Calendar } from 'lucide-react';
+import { ChevronDown, FileText, Search, Hash, Type, Calendar, ExternalLink } from 'lucide-react';
 import Modal from '../ui/Modal.jsx';
 import { detectUnit, getFormatter } from '../../utils/formatValue.js';
 
 const PAGE_SIZE = 25;
 const TYPE_ICONS = { number: Hash, string: Type, date: Calendar };
+const URL_RE = /^https?:\/\/\S+$/i;
+
+function isUrl(v) {
+  if (typeof v !== 'string') return false;
+  return URL_RE.test(v.trim());
+}
+
+function shortenUrl(u) {
+  try {
+    const parsed = new URL(u);
+    const host = parsed.hostname.replace(/^www\./, '');
+    const path = parsed.pathname.length > 1 ? parsed.pathname : '';
+    const trimmed = `${host}${path}`;
+    return trimmed.length > 36 ? `${trimmed.slice(0, 35)}…` : trimmed;
+  } catch {
+    return u.length > 40 ? `${u.slice(0, 39)}…` : u;
+  }
+}
 
 export default function SourceDataPanel({ sheet, defaultOpen = false }) {
   const [open, setOpen] = useState(defaultOpen);
@@ -50,6 +68,21 @@ export default function SourceDataPanel({ sheet, defaultOpen = false }) {
   function renderCell(row, col) {
     const v = row[col];
     if (v === null || v === undefined || v === '') return <span className="text-ink-400">—</span>;
+    if (isUrl(v)) {
+      return (
+        <a
+          href={String(v).trim()}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={(e) => e.stopPropagation()}
+          className="inline-flex items-center gap-1 text-brand-600 hover:text-brand-700 hover:underline max-w-[280px]"
+          title={String(v)}
+        >
+          <ExternalLink className="w-3 h-3 flex-shrink-0" />
+          <span className="truncate">{shortenUrl(String(v).trim())}</span>
+        </a>
+      );
+    }
     const f = fmts[col];
     if (f && Number.isFinite(Number(v))) return f(Number(v));
     if (types[col] === 'date') {

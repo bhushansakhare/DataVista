@@ -5,7 +5,7 @@ const BYTE_NAMES = /\b(size|bytes?|storage|disk|memory|capacity|volume|filesize)
 const CURRENCY_NAMES = /\b(price|cost|revenue|profit|sales|amount|total|fee|salary|budget|usd|inr|eur|gbp|spend|mrr|arr)\b/i;
 const PERCENT_NAMES = /\b(percent|percentage|ratio|rate|share|pct|conversion)\b/i;
 const COUNT_NAMES = /\b(count|qty|quantity|number|items?|orders?|users?|sessions?|visits?|clicks?)\b/i;
-const DURATION_NAMES = /\b(duration|elapsed|seconds?|minutes?|hours?|days?)\b/i;
+const DURATION_NAMES = /\b(duration|elapsed|seconds?|minutes?|hours?|days?|length|runtime|playtime|watchtime)\b/i;
 
 export function detectUnit(columnName, sampleValues) {
   if (!columnName) return 'number';

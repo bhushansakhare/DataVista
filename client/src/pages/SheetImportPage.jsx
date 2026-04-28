@@ -95,7 +95,7 @@ export default function SheetImportPage() {
           </div>
 
           <div className="card p-5">
-            <div className="label mb-3">Detected columns</div>
+            <div className="label mb-3">Columns</div>
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
               {sheet.columns.map((c) => {
                 const t = sheet.detectedTypes?.[c] || 'string';

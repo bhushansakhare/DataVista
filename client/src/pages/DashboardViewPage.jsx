@@ -10,6 +10,7 @@ import ShareModal from '../components/dashboard/ShareModal.jsx';
 import SourceDataPanel from '../components/dashboard/SourceDataPanel.jsx';
 import SummaryStats from '../components/dashboard/SummaryStats.jsx';
 import SectionHeader from '../components/dashboard/SectionHeader.jsx';
+import ColumnUsageCard from '../components/dashboard/ColumnUsageCard.jsx';
 import { fmtDateTime } from '../utils/format.js';
 
 const PAGE_SIZE = 6;
@@ -151,6 +152,8 @@ export default function DashboardViewPage() {
           )}
         </>
       )}
+
+      <ColumnUsageCard sheet={sheet} />
 
       <SourceDataPanel sheet={sheet} />
 
