@@ -12,6 +12,8 @@ import DashboardViewPage from './pages/DashboardViewPage.jsx';
 import SharedDashboardPage from './pages/SharedDashboardPage.jsx';
 import SuperAdminPage from './pages/SuperAdminPage.jsx';
 import SheetsPage from './pages/SheetsPage.jsx';
+import AiAssistantPage from './pages/AiAssistantPage.jsx';
+import TemplatesPage from './pages/TemplatesPage.jsx';
 import AppLayout from './components/layout/AppLayout.jsx';
 
 function Protected({ children, role }) {
@@ -40,6 +42,8 @@ export default function App() {
       <Route path="/onboarding" element={<Protected><OnboardingPage /></Protected>} />
       <Route element={<Protected><AppLayout /></Protected>}>
         <Route path="/app" element={<DashboardListPage />} />
+        <Route path="/app/ai" element={<AiAssistantPage />} />
+        <Route path="/app/templates" element={<TemplatesPage />} />
         <Route path="/app/sheets" element={<SheetsPage />} />
         <Route path="/app/sheets/import" element={<SheetImportPage />} />
         <Route path="/app/dashboards/new/:sheetId" element={<DashboardWizardPage />} />

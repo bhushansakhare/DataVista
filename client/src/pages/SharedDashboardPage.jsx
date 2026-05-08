@@ -1,12 +1,15 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { Sparkles, Lock, ArrowRight } from 'lucide-react';
+import { Sparkles, Lock, ArrowRight, AlertCircle } from 'lucide-react';
 import api from '../api/client.js';
 import ChartCard from '../components/charts/ChartCard.jsx';
 import SourceDataPanel from '../components/dashboard/SourceDataPanel.jsx';
-import SummaryStats from '../components/dashboard/SummaryStats.jsx';
+import KpiGrid from '../components/dashboard/KpiGrid.jsx';
+import DashboardFilters from '../components/dashboard/DashboardFilters.jsx';
 import SectionHeader from '../components/dashboard/SectionHeader.jsx';
 import ColumnUsageCard from '../components/dashboard/ColumnUsageCard.jsx';
+import DashboardSummaryBanner from '../components/dashboard/DashboardSummaryBanner.jsx';
+import { applyFilters } from '../utils/chartTransform.js';
 
 const PAGE_SIZE = 6;
 
@@ -54,11 +57,15 @@ export default function SharedDashboardPage() {
 
 function SharedView({ data }) {
   const { dashboard, sheet } = data;
-  const rows = sheet?.rawData || [];
+  const rawRows = sheet?.rawData || [];
+  const [filters, setFilters] = useState([]);
+  const rows = useMemo(() => applyFilters(rawRows, filters), [rawRows, filters]);
   const charts = dashboard.charts || [];
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const visible = charts.slice(0, visibleCount);
   const remaining = charts.length - visibleCount;
+  const noRawRows = rawRows.length === 0;
+  const filtersWipedAll = !noRawRows && rows.length === 0 && filters.length > 0;
 
   return (
     <div className="min-h-screen bg-mesh-light dark:bg-mesh-dark">
@@ -80,7 +87,34 @@ function SharedView({ data }) {
       </header>
 
       <main className="max-w-7xl mx-auto px-5 py-8">
-        <SummaryStats sheet={sheet} />
+        <DashboardSummaryBanner sheet={sheet} dashboardId={dashboard?._id} dismissible={false} />
+
+        {noRawRows && (
+          <div className="mb-4 rounded-xl border border-amber-300/60 bg-amber-50 dark:bg-amber-500/10 dark:border-amber-500/30 px-4 py-3 text-[13px] text-amber-800 dark:text-amber-200 flex items-start gap-2">
+            <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+            <div>
+              <div className="font-semibold">Sheet has no rows yet</div>
+              <div className="opacity-80 mt-0.5">Charts will appear once the owner refreshes the source.</div>
+            </div>
+          </div>
+        )}
+
+        {filtersWipedAll && (
+          <div className="mb-4 rounded-xl border border-amber-300/60 bg-amber-50 dark:bg-amber-500/10 dark:border-amber-500/30 px-4 py-3 text-[13px] text-amber-800 dark:text-amber-200 flex items-start gap-2">
+            <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+            <div>
+              <div className="font-semibold">Filters return 0 rows</div>
+              <div className="opacity-80 mt-0.5">Clear or widen filters above to see chart data.</div>
+              <button onClick={() => setFilters([])} className="btn-secondary mt-2 text-xs py-1 px-2">
+                Clear all filters
+              </button>
+            </div>
+          </div>
+        )}
+
+        <DashboardFilters sheet={sheet} filters={filters} onChange={setFilters} />
+
+        <KpiGrid sheet={sheet} filters={filters} />
 
         {charts.length === 0 ? (
           <div className="card p-10 text-center text-ink-500">This dashboard has no charts yet.</div>
@@ -97,7 +131,7 @@ function SharedView({ data }) {
                   chart={c}
                   rows={rows}
                   height={300}
-                  sheetTitle={sheet?.title}
+                  sheet={sheet}
                 />
               ))}
             </div>

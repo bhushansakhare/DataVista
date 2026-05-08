@@ -2,7 +2,7 @@ import { Outlet, NavLink, Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext.jsx';
 import { useTheme } from '../../context/ThemeContext.jsx';
 import {
-  LayoutDashboard, Sheet, Plus, Shield, Sun, Moon, LogOut, Sparkles, Menu, X,
+  LayoutDashboard, Sheet, Plus, Shield, Sun, Moon, LogOut, Sparkles, Menu, X, Bot, LayoutTemplate,
 } from 'lucide-react';
 import { useState } from 'react';
 
@@ -61,6 +61,8 @@ export default function AppLayout() {
         <nav className="flex-1 px-3 space-y-1 overflow-y-auto" onClick={() => setOpen(false)}>
           <NavItem to="/app" icon={LayoutDashboard} end>Dashboards</NavItem>
           <NavItem to="/app/sheets" icon={Sheet}>Sheets</NavItem>
+          <NavItem to="/app/ai" icon={Bot}>AI Assistant</NavItem>
+          <NavItem to="/app/templates" icon={LayoutTemplate}>Templates</NavItem>
           {user?.role === 'superadmin' && (
             <>
               <div className="px-3 pt-4 pb-1 label">Admin</div>

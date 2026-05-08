@@ -1,12 +1,13 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth.js';
 import {
-  importSheet, listSheets, getSheet, refreshSheet, deleteSheet, updateColumns,
+  importSheet, uploadSheet, listSheets, getSheet, refreshSheet, deleteSheet, updateColumns,
 } from '../controllers/sheetController.js';
 
 const r = Router();
 r.use(requireAuth);
 r.post('/import', importSheet);
+r.post('/upload', uploadSheet);
 r.get('/', listSheets);
 r.get('/:id', getSheet);
 r.post('/:id/refresh', refreshSheet);

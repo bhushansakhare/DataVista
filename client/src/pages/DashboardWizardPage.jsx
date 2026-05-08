@@ -7,7 +7,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   ArrowLeft, ArrowRight, Check, Database, Hash, Type, Calendar,
   Sparkles, Save, Trash2, ChevronUp, ChevronDown, Pencil,
-  Plus, AlertCircle, CheckSquare, Square,
+  Plus, AlertCircle, CheckSquare, Square, Wand2, Lock,
   BarChart3, LineChart as LineIcon, PieChart as PieIcon, AreaChart as AreaIcon,
   Layers, AlignLeft, ScatterChart as ScatterIcon, Boxes,
   Filter as FunnelIcon, CircleDot, Grid3x3, TrendingUp, Link2,
@@ -23,6 +23,11 @@ import { useSocket, getGlobalSocket } from '../hooks/useSocket.js';
 import { describeChart, columnsUsed } from '../utils/chartLabels.js';
 import { getAxisCandidates } from '../utils/columnInsights.js';
 import { looksNumeric } from '../utils/chartTransform.js';
+import { useColumnReasoning } from '../hooks/useColumnReasoning.js';
+import { suggestChart } from '../utils/chartSuggester.js';
+import { aggOptionsFor, AGG_LABEL, defaultAggFor } from '../utils/columnAggregations.js';
+import ColumnTip from '../components/ui/ColumnTip.jsx';
+import MappingPreview from '../components/charts/MappingPreview.jsx';
 
 const STEPS = [
   { key: 'preview', label: 'Preview data' },
@@ -414,6 +419,7 @@ function ChartsStep({ charts, setCharts, sheet, rows, selected }) {
   );
 
   // ─────────── Builder form state ───────────
+  const [mode, setMode] = useState('auto'); // 'auto' | 'manual' — explainability layer
   const [chartTypes, setChartTypes] = useState(['bar']);
   const [xField, setXField] = useState('');
   const [yColumns, setYColumns] = useState([]);
@@ -422,26 +428,68 @@ function ChartsStep({ charts, setCharts, sheet, rows, selected }) {
   const [error, setError] = useState('');
   const [editingId, setEditingId] = useState(null);
 
+  // ─────────── Reasoning + suggestion ───────────
+  const reasoning = useColumnReasoning(liveSheet);
+  const suggestion = useMemo(
+    () => suggestChart(liveSheet, { reasoning }),
+    [liveSheet, reasoning]
+  );
+
+  // Mode-mirroring: in Auto mode, the form passively reflects the suggestion.
+  // In Manual mode the effect is a no-op so user edits stick.
+  useEffect(() => {
+    if (mode !== 'auto') return;
+    const cfg = suggestion.config;
+    setChartTypes([cfg.type || 'bar']);
+    setXField(cfg.xField || '');
+    setYColumns(Array.isArray(cfg.yFields) && cfg.yFields.length
+      ? cfg.yFields
+      : (cfg.yField ? [cfg.yField] : []));
+    setGroupBy(cfg.groupBy || '');
+    setAggregation(cfg.aggregation || 'sum');
+    setError('');
+  }, [mode, suggestion]);
+
   // Initialise sane defaults whenever the column selection changes upstream.
   useEffect(() => {
     if (!xField || !plottableCols.includes(xField)) {
       setXField(plottableCols[0] || '');
     }
-    setYColumns((prev) => prev.filter((c) => numericCols.includes(c)));
+    // Y can now hold any plottable column (numeric, text, date, id) — drop only
+    // those that disappeared from the upstream selection.
+    setYColumns((prev) => prev.filter((c) => plottableCols.includes(c)));
     setGroupBy((prev) => (prev && plottableCols.includes(prev) ? prev : ''));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [plottableCols.join('|'), numericCols.join('|')]);
+  }, [plottableCols.join('|')]);
 
-  // Pre-check the first 1-2 numeric columns by default if user hasn't picked any.
+  // Pre-check sensible defaults: prefer numerics, fall back to first 1-2 plottable.
   useEffect(() => {
-    if (yColumns.length === 0 && numericCols.length > 0) {
-      setYColumns(numericCols.slice(0, Math.min(2, numericCols.length)));
+    if (yColumns.length === 0) {
+      const seed = numericCols.length > 0
+        ? numericCols.slice(0, Math.min(2, numericCols.length))
+        : plottableCols.slice(0, Math.min(1, plottableCols.length));
+      if (seed.length) setYColumns(seed);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [numericCols.join('|')]);
+  }, [numericCols.join('|'), plottableCols.join('|')]);
+
+  // Reconcile aggregation against the first Y column. If the user picked a text
+  // Y but aggregation is still 'sum', auto-switch to a valid op (unique/count).
+  useEffect(() => {
+    const firstY = yColumns[0];
+    if (!firstY) {
+      if (aggregation !== 'count') setAggregation('count');
+      return;
+    }
+    const opts = aggOptionsFor(firstY, reasoning);
+    if (!opts.includes(aggregation)) {
+      setAggregation(defaultAggFor(firstY, reasoning));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [yColumns.join('|'), reasoning]);
 
   const allTypesChecked = chartTypes.length === CHART_TYPE_OPTIONS.length;
-  const allYChecked = yColumns.length === numericCols.length && numericCols.length > 0;
+  const allYChecked = yColumns.length === plottableCols.length && plottableCols.length > 0;
 
   function toggleType(t) {
     setChartTypes((p) => (p.includes(t) ? p.filter((x) => x !== t) : [...p, t]));
@@ -456,7 +504,7 @@ function ChartsStep({ charts, setCharts, sheet, rows, selected }) {
     setError('');
   }
   function toggleAllY() {
-    setYColumns(allYChecked ? [] : [...numericCols]);
+    setYColumns(allYChecked ? [] : [...plottableCols]);
     setError('');
   }
 
@@ -525,12 +573,16 @@ function ChartsStep({ charts, setCharts, sheet, rows, selected }) {
     <div className="space-y-6">
       {/* Custom Chart Builder form */}
       <div className="card p-5 space-y-5">
-        <div>
-          <h3 className="font-semibold text-base">Custom chart builder</h3>
-          <p className="text-xs text-ink-500 mt-1">
-            Pick chart types, X/Y axes, and group-by — then click Add.
-            Repeat to build your dashboard chart by chart.
-          </p>
+        <div className="flex items-start justify-between gap-3 flex-wrap">
+          <div>
+            <h3 className="font-semibold text-base">Custom chart builder</h3>
+            <p className="text-xs text-ink-500 mt-1">
+              {mode === 'auto'
+                ? "We've pre-filled the form using data-type detection. Switch to Manual to override anything."
+                : 'You control every field. Click any 💡 suggestion chip to accept it.'}
+            </p>
+          </div>
+          <ModeToggle mode={mode} onChange={setMode} />
         </div>
 
         {/* Plottable columns chips (read-only) */}
@@ -552,13 +604,14 @@ function ChartsStep({ charts, setCharts, sheet, rows, selected }) {
                     ? 'bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/20'
                     : 'bg-brand-500/10 text-brand-700 dark:text-brand-300 border-brand-500/20';
                 return (
-                  <span
-                    key={c}
-                    className={`inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full border ${chipCls}`}
-                  >
-                    <Icon className="w-3 h-3" />
-                    {c}
-                  </span>
+                  <ColumnTip key={c} column={c} reasoning={reasoning}>
+                    <span
+                      className={`inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full border cursor-help ${chipCls}`}
+                    >
+                      <Icon className="w-3 h-3" />
+                      {c}
+                    </span>
+                  </ColumnTip>
                 );
               })}
             </div>
@@ -616,10 +669,19 @@ function ChartsStep({ charts, setCharts, sheet, rows, selected }) {
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
           <div className="space-y-4">
             <div>
-              <label className="label">X axis</label>
+              <div className="flex items-center justify-between mb-1.5 flex-wrap gap-2">
+                <label className="label">X axis</label>
+                <SuggestionChip
+                  field="X axis"
+                  value={suggestion.config.xField}
+                  current={xField}
+                  onAccept={() => setXField(suggestion.config.xField || '')}
+                  reasoning={reasoning}
+                />
+              </div>
               <select
                 value={xField}
-                onChange={(e) => { setXField(e.target.value); setError(''); }}
+                onChange={(e) => { setXField(e.target.value); setError(''); if (mode === 'auto') setMode('manual'); }}
                 className="input mt-1.5"
               >
                 <option value="">— pick a column —</option>
@@ -634,39 +696,76 @@ function ChartsStep({ charts, setCharts, sheet, rows, selected }) {
             <div>
               <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
                 <label className="label">
-                  Y axis (multi-select) · {yColumns.length} of {numericCols.length}
+                  Y axis · {yColumns.length} of {plottableCols.length} <span className="normal-case text-ink-400 text-[10px] font-normal">(numeric, text via count/unique)</span>
                 </label>
-                <button onClick={toggleAllY} className="btn-ghost text-xs py-1" disabled={numericCols.length === 0}>
-                  {allYChecked ? <><Square className="w-3 h-3" /> Clear</> : <><CheckSquare className="w-3 h-3" /> Select all</>}
-                </button>
+                <div className="flex items-center gap-2">
+                  <SuggestionChip
+                    field="Y axis"
+                    value={
+                      Array.isArray(suggestion.config.yFields) && suggestion.config.yFields.length
+                        ? suggestion.config.yFields
+                        : (suggestion.config.yField ? [suggestion.config.yField] : [])
+                    }
+                    current={yColumns}
+                    onAccept={() => {
+                      const ys = Array.isArray(suggestion.config.yFields) && suggestion.config.yFields.length
+                        ? suggestion.config.yFields
+                        : (suggestion.config.yField ? [suggestion.config.yField] : []);
+                      setYColumns(ys);
+                      if (mode === 'auto') setMode('manual');
+                    }}
+                    reasoning={reasoning}
+                  />
+                  <button onClick={toggleAllY} className="btn-ghost text-xs py-1" disabled={plottableCols.length === 0}>
+                    {allYChecked ? <><Square className="w-3 h-3" /> Clear</> : <><CheckSquare className="w-3 h-3" /> Select all</>}
+                  </button>
+                </div>
               </div>
-              {numericCols.length === 0 ? (
-                <div className="rounded-xl border border-ink-200/60 dark:border-ink-800/60 px-3 py-3 text-xs text-ink-500">
-                  No numeric columns detected — chart will count rows.
+              {numericCols.length === 0 && (
+                <div className="mb-2 rounded-xl border border-amber-500/30 bg-amber-500/5 px-3 py-2">
+                  <div className="text-xs font-semibold text-amber-700 dark:text-amber-300">Using count-based metrics (no numeric columns found)</div>
+                  <div className="text-[11px] text-ink-600 dark:text-ink-300 mt-0.5 leading-relaxed">
+                    Pick text columns below — each one will be charted as <span className="font-medium">unique</span> or <span className="font-medium">count</span> automatically.
+                  </div>
+                </div>
+              )}
+              {plottableCols.length === 0 ? (
+                <div className="rounded-xl border border-ink-200/60 dark:border-ink-800/60 px-3 py-4 text-xs text-ink-500">
+                  No selectable columns. Go back and check at least one column that isn&apos;t a URL.
                 </div>
               ) : (
-                <div className="rounded-xl border border-ink-200/60 dark:border-ink-800/60 max-h-[180px] overflow-y-auto p-1">
-                  {numericCols.map((c) => {
+                <div className="rounded-xl border border-ink-200/60 dark:border-ink-800/60 max-h-[200px] overflow-y-auto p-1">
+                  {plottableCols.map((c) => {
                     const checked = yColumns.includes(c);
+                    const t = types[c] || 'string';
+                    const isNumeric = numericCols.includes(c);
+                    const Icon = COL_ICON[t] || Hash;
+                    const chipCls = isNumeric
+                      ? 'bg-emerald-500/10 text-emerald-600'
+                      : t === 'date'
+                      ? 'bg-amber-500/10 text-amber-600'
+                      : 'bg-brand-500/10 text-brand-600';
+                    const chipLabel = isNumeric ? 'number' : (t === 'date' ? 'date' : 'text');
                     return (
-                      <label
-                        key={c}
-                        className={`flex items-center gap-3 px-3 py-1.5 rounded-lg cursor-pointer transition ${
-                          checked ? 'bg-brand-500/10 hover:bg-brand-500/15' : 'hover:bg-ink-100 dark:hover:bg-ink-800/50'
-                        }`}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={() => toggleY(c)}
-                          className="w-4 h-4 accent-brand-500 cursor-pointer"
-                        />
-                        <Hash className={`w-3.5 h-3.5 ${checked ? 'text-brand-600' : 'text-ink-400'}`} />
-                        <span className="font-medium text-sm flex-1 truncate">{c}</span>
-                        <span className="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full font-semibold bg-emerald-500/10 text-emerald-600">
-                          number
-                        </span>
-                      </label>
+                      <ColumnTip key={c} column={c} reasoning={reasoning} side="right" className="block w-full">
+                        <label
+                          className={`flex items-center gap-3 px-3 py-1.5 rounded-lg cursor-pointer transition w-full ${
+                            checked ? 'bg-brand-500/10 hover:bg-brand-500/15' : 'hover:bg-ink-100 dark:hover:bg-ink-800/50'
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggleY(c)}
+                            className="w-4 h-4 accent-brand-500 cursor-pointer"
+                          />
+                          <Icon className={`w-3.5 h-3.5 ${checked ? 'text-brand-600' : 'text-ink-400'}`} />
+                          <span className="font-medium text-sm flex-1 truncate">{c}</span>
+                          <span className={`text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full font-semibold ${chipCls}`}>
+                            {chipLabel}
+                          </span>
+                        </label>
+                      </ColumnTip>
                     );
                   })}
                 </div>
@@ -696,46 +795,34 @@ function ChartsStep({ charts, setCharts, sheet, rows, selected }) {
                   onChange={(e) => setAggregation(e.target.value)}
                   className="input mt-1.5"
                 >
-                  <option value="sum">Sum</option>
-                  <option value="avg">Average</option>
-                  <option value="count">Count</option>
-                  <option value="min">Min</option>
-                  <option value="max">Max</option>
-                  <option value="none">None</option>
+                  {(yColumns.length > 0
+                    ? aggOptionsFor(yColumns[0], reasoning)
+                    : ['count']
+                  ).map((o) => (
+                    <option key={o} value={o}>{AGG_LABEL[o] || o}</option>
+                  ))}
                 </select>
               </div>
             </div>
           </div>
 
-          {/* Live preview */}
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <label className="label flex items-center gap-1.5"><Sparkles className="w-3 h-3" /> Live preview</label>
-              {previewChart && <span className="chip text-[10px]">{describeChart(previewChart).typeLabel}</span>}
-            </div>
-            <div className="card p-3">
-              {previewChart ? (
-                <ChartRenderer chart={previewChart} rows={rows || []} height={220} />
-              ) : (
-                <div className="h-[220px] flex items-center justify-center text-sm text-ink-500 text-center px-4">
-                  Pick an X axis and at least one chart type to see a preview.
-                </div>
-              )}
-              {previewChart && columnsUsed(previewChart).length > 0 && (
-                <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                  <span className="text-[10px] uppercase tracking-wider font-semibold text-ink-500">
-                    Columns used
-                  </span>
-                  {columnsUsed(previewChart).map((c) => (
-                    <span
-                      key={c}
-                      className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-ink-100 dark:bg-ink-800/60 text-ink-700 dark:text-ink-200"
-                    >
-                      {c}
-                    </span>
-                  ))}
-                </div>
-              )}
+          {/* Mapping preview + Live preview */}
+          <div className="space-y-3">
+            {previewChart && <MappingPreview chart={previewChart} sheet={liveSheet} />}
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <label className="label flex items-center gap-1.5"><Sparkles className="w-3 h-3" /> Live preview</label>
+                {previewChart && <span className="chip text-[10px]">{describeChart(previewChart).typeLabel}</span>}
+              </div>
+              <div className="card p-3">
+                {previewChart ? (
+                  <ChartRenderer chart={previewChart} rows={rows || []} height={220} />
+                ) : (
+                  <div className="h-[220px] flex items-center justify-center text-sm text-ink-500 text-center px-4">
+                    Pick an X axis and at least one chart type to see a preview.
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -938,4 +1025,72 @@ function FinalizeStep({ charts, rows, title, setTitle }) {
       </div>
     </div>
   );
+}
+
+/* ─────────── explainability helpers ─────────── */
+
+function ModeToggle({ mode, onChange }) {
+  return (
+    <div className="inline-flex items-center rounded-xl border border-ink-200/60 dark:border-ink-800/60 p-1 bg-white dark:bg-ink-900/50">
+      <button
+        type="button"
+        onClick={() => onChange('auto')}
+        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition ${
+          mode === 'auto'
+            ? 'bg-brand-500 text-white shadow-ring'
+            : 'text-ink-600 dark:text-ink-300 hover:text-ink-900 dark:hover:text-white'
+        }`}
+        title="AI suggests every field — switch to Manual to override"
+      >
+        <Wand2 className="w-3.5 h-3.5" /> Auto
+      </button>
+      <button
+        type="button"
+        onClick={() => onChange('manual')}
+        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition ${
+          mode === 'manual'
+            ? 'bg-brand-500 text-white shadow-ring'
+            : 'text-ink-600 dark:text-ink-300 hover:text-ink-900 dark:hover:text-white'
+        }`}
+        title="You control every field"
+      >
+        <Lock className="w-3.5 h-3.5" /> Manual
+      </button>
+    </div>
+  );
+}
+
+function SuggestionChip({ field, value, current, onAccept, reasoning }) {
+  // Normalise to array for comparison
+  const sugArr = Array.isArray(value) ? value : (value ? [value] : []);
+  const curArr = Array.isArray(current) ? current : (current ? [current] : []);
+  if (sugArr.length === 0) return null;
+  const sameSet =
+    sugArr.length === curArr.length &&
+    sugArr.every((v) => curArr.includes(v));
+  if (sameSet) {
+    return (
+      <span className="inline-flex items-center gap-1 text-[11px] text-emerald-600 font-medium" title="Suggestion already applied">
+        <Check className="w-3 h-3" /> Suggestion applied
+      </span>
+    );
+  }
+  const display = sugArr.join(', ');
+  const tipColumn = sugArr.length === 1 ? sugArr[0] : null;
+  const inner = (
+    <button
+      type="button"
+      onClick={onAccept}
+      className="inline-flex items-center gap-1 text-[11px] font-medium text-brand-600 hover:text-brand-700 hover:underline"
+      title={`Use AI suggestion for ${field}`}
+    >
+      <Wand2 className="w-3 h-3" />
+      Suggested: <span className="font-semibold">{display}</span>
+    </button>
+  );
+  return tipColumn ? (
+    <ColumnTip column={tipColumn} reasoning={reasoning}>
+      {inner}
+    </ColumnTip>
+  ) : inner;
 }

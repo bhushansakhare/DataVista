@@ -8,27 +8,25 @@ import {
 } from 'recharts';
 import {
   PALETTE, aggregate, totalsPerMetric, buildScatter, buildTreemap, buildFunnel, buildHeatmap, buildWaterfall,
+  simplifyForChart,
 } from '../../utils/chartTransform.js';
-import { detectUnit, getFormatter } from '../../utils/formatValue.js';
+import { formatterForChart } from '../../utils/businessKpis.js';
 
-const tickStyle = { fontSize: 11, fill: 'currentColor' };
-const gridStroke = 'rgba(148,163,184,0.18)';
+const tickStyle = { fontSize: 11, fill: 'currentColor', opacity: 0.65 };
+// Soft gridlines — premium dashboards feel breathable, not boxed-in.
+const gridStroke = 'rgba(148,163,184,0.10)';
 
 export default function ChartRenderer({ chart, rows, height = 300 }) {
   const safeRows = Array.isArray(rows) ? rows : [];
   const view = useMemo(() => (chart ? buildView(chart, safeRows) : { data: [] }), [chart, safeRows]);
-  // Pick a smart formatter for the value axis based on the Y column name + sample values.
-  // For multi-Y charts, use the first yField as the formatter hint (the axis is shared).
-  const fmt = useMemo(() => {
-    const ys = Array.isArray(chart?.yFields) && chart.yFields.length > 0
-      ? chart.yFields
-      : (chart?.yField ? [chart.yField] : []);
-    if (ys.length === 0) return getFormatter('integer'); // count of rows
-    const primary = ys[0];
-    const sample = safeRows.slice(0, 80).map((r) => r[primary]);
-    const unit = detectUnit(primary, sample);
-    return getFormatter(unit);
-  }, [chart?.yField, chart?.yFields, safeRows]);
+  // Unified formatter — keys off (a) chart aggregation (count → integer) and
+  // (b) column kind (bytes / duration / currency / number). Used for the
+  // Y-axis ticks, tooltips, donut percentages, and heatmap cells so values
+  // like a 374 GB total never render as raw bytes.
+  const fmt = useMemo(
+    () => formatterForChart(chart, safeRows),
+    [chart?.yField, chart?.yFields, chart?.aggregation, safeRows]
+  );
 
   if (!chart || !chart.type) {
     return (
@@ -40,6 +38,33 @@ export default function ChartRenderer({ chart, rows, height = 300 }) {
       </div>
     );
   }
+
+  // Empty-state: either filters wiped the rows, or the chart's X column has
+  // no usable values. Either way, render a friendly message — never a blank axis.
+  const viewIsEmpty =
+    (Array.isArray(view.data) && view.data.length === 0) ||
+    (chart.type === 'heatmap' && (!view.xs || view.xs.length === 0 || !view.ys || view.ys.length === 0)) ||
+    (chart.type === 'scatter' && Array.isArray(view.series) && view.series.every((s) => !s.data || s.data.length === 0));
+
+  if (viewIsEmpty) {
+    const noRows = safeRows.length === 0;
+    const title = noRows ? 'No data available after applying filters' : 'No values to chart';
+    const subtitle = noRows
+      ? 'Adjust or clear filters to see this chart.'
+      : !chart.xField
+      ? 'Pick an X axis column for this chart.'
+      : `Column "${chart.xField}" has no usable values.`;
+    return (
+      <div
+        className="w-full flex flex-col items-center justify-center text-center px-6 rounded-xl bg-ink-50/60 dark:bg-ink-800/30"
+        style={{ height }}
+      >
+        <div className="text-sm font-medium text-ink-500">{title}</div>
+        <div className="text-xs text-ink-400 mt-1">{subtitle}</div>
+      </div>
+    );
+  }
+
   if (chart.type === 'heatmap') {
     return (
       <div className="w-full text-ink-600 dark:text-ink-300" style={{ height }}>
@@ -57,6 +82,13 @@ export default function ChartRenderer({ chart, rows, height = 300 }) {
 }
 
 function buildView(chart, rows) {
+  // Aggregate from the FULL dataset using the AI's column references, then
+  // run the cap+bucket pass so every chart respects the readability caps
+  // (≤12 line points, ≤10 bars, ≤6 donut slices with "Others" merge, etc.).
+  return simplifyForChart(buildViewRaw(chart, rows), chart);
+}
+
+function buildViewRaw(chart, rows) {
   // Multi-Y indicator — used to show one slice/bucket per metric instead of by X.
   const ys = Array.isArray(chart.yFields) && chart.yFields.length > 0
     ? chart.yFields

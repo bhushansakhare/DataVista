@@ -5,6 +5,8 @@ import ChartTypePicker from './ChartTypePicker.jsx';
 import ChartRenderer from './ChartRenderer.jsx';
 import { describeChart, columnsUsed } from '../../utils/chartLabels.js';
 import { getAxisCandidates } from '../../utils/columnInsights.js';
+import { useColumnReasoning } from '../../hooks/useColumnReasoning.js';
+import { aggOptionsFor, defaultAggFor, AGG_LABEL } from '../../utils/columnAggregations.js';
 
 const FILTER_OPS = [
   { id: 'equals', label: 'equals' },
@@ -37,6 +39,7 @@ export default function ChartEditorPanel({ open, chart, sheet, rows, onSave, onC
   const groupCols = candidates.groupCandidates;
   const skipped = candidates.excluded;
   const safeRows = Array.isArray(rows) ? rows : [];
+  const reasoning = useColumnReasoning(sheet);
 
   // Use draft for rendering, but never assume non-null.
   const view = draft || chart;
@@ -45,7 +48,24 @@ export default function ChartEditorPanel({ open, chart, sheet, rows, onSave, onC
   const usedCols = columnsUsed(view || {});
 
   function set(patch) {
-    setDraft((d) => ({ ...(d || chart || {}), ...patch }));
+    setDraft((d) => {
+      const next = { ...(d || chart || {}), ...patch };
+      // Auto-reconcile aggregation whenever the Y column changes — picking a
+      // text column should switch sum → unique automatically.
+      if ('yField' in patch || 'yFields' in patch) {
+        const yCol = next.yField || (Array.isArray(next.yFields) && next.yFields[0]) || null;
+        if (yCol) {
+          const opts = aggOptionsFor(yCol, reasoning);
+          if (!opts.includes(next.aggregation)) {
+            next.aggregation = defaultAggFor(yCol, reasoning);
+          }
+        } else if (next.aggregation === 'sum' || next.aggregation === 'avg' || next.aggregation === 'min' || next.aggregation === 'max') {
+          // No Y → fall back to count
+          next.aggregation = 'count';
+        }
+      }
+      return next;
+    });
   }
 
   function commit() {
@@ -151,11 +171,25 @@ export default function ChartEditorPanel({ open, chart, sheet, rows, onSave, onC
                 <Field
                   label={isPie ? 'Value' : 'Y axis'}
                   value={view.yField}
-                  options={[{ value: '', label: '— count rows —' }, ...numericCols]}
+                  options={[
+                    { value: '', label: '— count rows —' },
+                    ...cols.map((c) => {
+                      const role = reasoning?.[c]?.role;
+                      const tag =
+                        role === 'metric' ? 'number'
+                        : role === 'time' ? 'date'
+                        : role === 'category' ? 'category'
+                        : role === 'id' ? 'id'
+                        : 'text';
+                      return { value: c, label: `${c} · ${tag}` };
+                    }),
+                  ]}
                   onChange={(v) => set({ yField: v })}
-                  hint={numericCols.length === 0
-                    ? 'No numeric columns detected — chart will count rows.'
-                    : 'Only numeric columns can be plotted as values.'}
+                  hint={
+                    numericCols.length === 0
+                      ? 'No numeric columns — text/date columns will be charted as count or unique values automatically.'
+                      : 'Numeric → sum / avg / min / max. Text or date → count / unique / non-empty.'
+                  }
                 />
                 <Field
                   label="Group by"
@@ -166,15 +200,22 @@ export default function ChartEditorPanel({ open, chart, sheet, rows, onSave, onC
                 <Field
                   label="Aggregation"
                   value={view.aggregation}
-                  options={[
-                    { value: 'sum', label: 'Sum' },
-                    { value: 'avg', label: 'Average' },
-                    { value: 'count', label: 'Count' },
-                    { value: 'min', label: 'Min' },
-                    { value: 'max', label: 'Max' },
-                    { value: 'none', label: 'None' },
-                  ]}
+                  options={(() => {
+                    const yCol = view.yField || (Array.isArray(view.yFields) && view.yFields[0]) || null;
+                    const opts = yCol
+                      ? aggOptionsFor(yCol, reasoning)
+                      : ['count'];
+                    return opts.map((o) => ({ value: o, label: AGG_LABEL[o] || o }));
+                  })()}
                   onChange={(v) => set({ aggregation: v })}
+                  hint={(() => {
+                    const yCol = view.yField || (Array.isArray(view.yFields) && view.yFields[0]) || null;
+                    const role = yCol ? reasoning?.[yCol]?.role : null;
+                    if (!yCol) return 'No Y picked — chart will count rows.';
+                    if (role === 'metric') return 'Numeric column — sum / avg / min / max all work.';
+                    if (role === 'text' || role === 'id') return 'Text column — best aggregations are unique or count.';
+                    return 'Aggregations adapt to the Y column type.';
+                  })()}
                 />
               </div>
 
@@ -238,15 +279,10 @@ export default function ChartEditorPanel({ open, chart, sheet, rows, onSave, onC
                 </div>
               </div>
 
-              {(skipped.urls.length > 0 || skipped.ids.length > 0) && (
+              {skipped.urls.length > 0 && (
                 <div className="rounded-lg bg-ink-50 dark:bg-ink-800/40 px-3 py-2 text-[11px] text-ink-500 leading-relaxed">
                   <span className="font-semibold text-ink-700 dark:text-ink-200">Hidden from axes: </span>
-                  {skipped.urls.length > 0 && (
-                    <>URL columns ({skipped.urls.join(', ')}){skipped.ids.length > 0 ? ' · ' : ''}</>
-                  )}
-                  {skipped.ids.length > 0 && (
-                    <>ID columns ({skipped.ids.join(', ')}) skipped from Y-axis</>
-                  )}
+                  URL columns ({skipped.urls.join(', ')}) — only shown in the data table
                 </div>
               )}
             </div>

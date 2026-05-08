@@ -3,10 +3,24 @@ import Sheet from '../models/Sheet.js';
 
 export async function createDashboard(req, res, next) {
   try {
-    const { sheetId, title, description, charts, layout, theme } = req.body;
+    const {
+      sheetId, title, description, charts, insights,
+      templateId, layoutType, styleConfig, layout, theme,
+      templateType, templateCode, templateUrl,
+    } = req.body;
     if (!sheetId) return res.status(400).json({ error: 'sheetId is required' });
     const sheet = await Sheet.findOne({ _id: sheetId, workspaceId: req.user.workspaceId });
     if (!sheet) return res.status(404).json({ error: 'Sheet not found' });
+
+    const validLayout = ['hero-grid', 'dense-grid', 'sidebar'].includes(layoutType) ? layoutType : '';
+    const cleanStyle = (styleConfig && typeof styleConfig === 'object') ? {
+      density:   ['compact', 'airy'].includes(styleConfig.density) ? styleConfig.density : '',
+      cardStyle: ['soft', 'sharp'].includes(styleConfig.cardStyle) ? styleConfig.cardStyle : '',
+      accent:    ['brand', 'emerald', 'purple', 'amber'].includes(styleConfig.accent) ? styleConfig.accent : '',
+      mode:      ['light', 'dark'].includes(styleConfig.mode) ? styleConfig.mode : '',
+    } : { density: '', cardStyle: '', accent: '', mode: '' };
+
+    const validTemplateType = ['slots', 'html', 'url'].includes(templateType) ? templateType : '';
 
     const dashboard = await Dashboard.create({
       workspaceId: req.user.workspaceId,
@@ -15,6 +29,13 @@ export async function createDashboard(req, res, next) {
       title: title || 'Untitled dashboard',
       description: description || '',
       charts: charts || [],
+      insights: Array.isArray(insights) ? insights : [],
+      templateId: typeof templateId === 'string' ? templateId : '',
+      templateType: validTemplateType,
+      templateCode: typeof templateCode === 'string' ? templateCode : '',
+      templateUrl:  typeof templateUrl  === 'string' ? templateUrl  : '',
+      layoutType: validLayout,
+      styleConfig: cleanStyle,
       layout: layout || 'grid',
       theme: theme || 'light',
     });
@@ -48,8 +69,8 @@ export async function getDashboard(req, res, next) {
 
 export async function updateDashboard(req, res, next) {
   try {
-    const updates = (({ title, description, charts, layout, theme }) =>
-      ({ title, description, charts, layout, theme }))(req.body);
+    const updates = (({ title, description, charts, insights, layout, theme }) =>
+      ({ title, description, charts, insights, layout, theme }))(req.body);
     Object.keys(updates).forEach((k) => updates[k] === undefined && delete updates[k]);
     const dashboard = await Dashboard.findOneAndUpdate(
       { _id: req.params.id, workspaceId: req.user.workspaceId },
@@ -70,6 +91,38 @@ export async function deleteDashboard(req, res, next) {
     const d = await Dashboard.findOneAndDelete({ _id: req.params.id, workspaceId: req.user.workspaceId });
     if (!d) return res.status(404).json({ error: 'Dashboard not found' });
     res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/dashboard/history — chronological list of dashboards in the
+ * workspace, optionally filtered by `?sheetId=`. Returns a lightweight
+ * projection (id, title, sheetId, chart count, timestamps) so the history
+ * panel renders fast even when there are hundreds of past dashboards.
+ */
+export async function dashboardHistory(req, res, next) {
+  try {
+    const query = { workspaceId: req.user.workspaceId };
+    if (req.query.sheetId) query.sheetId = req.query.sheetId;
+    const docs = await Dashboard.find(query)
+      .sort({ createdAt: -1 })
+      .limit(Math.min(Number(req.query.limit) || 100, 500))
+      .select('title sheetId charts createdAt updatedAt theme')
+      .populate('sheetId', 'title')
+      .lean();
+    const history = docs.map((d) => ({
+      _id: d._id,
+      title: d.title,
+      sheetId: d.sheetId?._id || d.sheetId,
+      sheetTitle: d.sheetId?.title || null,
+      chartCount: Array.isArray(d.charts) ? d.charts.length : 0,
+      theme: d.theme,
+      createdAt: d.createdAt,
+      updatedAt: d.updatedAt,
+    }));
+    res.json({ history });
   } catch (err) {
     next(err);
   }

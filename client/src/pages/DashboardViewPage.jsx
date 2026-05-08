@@ -1,17 +1,22 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useMemo } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { Pencil, RefreshCw, Share2, ArrowLeft, Plus, Sparkles } from 'lucide-react';
+import { Pencil, RefreshCw, Share2, ArrowLeft, Plus, Sparkles, AlertCircle, Lightbulb } from 'lucide-react';
+import TemplateLayout from '../components/templates/templateChrome.jsx';
+import TemplateIframe from '../components/templates/TemplateIframe.jsx';
 import api from '../api/client.js';
 import { useToast } from '../context/ToastContext.jsx';
 import ChartCard from '../components/charts/ChartCard.jsx';
 import { useSocket, getGlobalSocket } from '../hooks/useSocket.js';
 import ShareModal from '../components/dashboard/ShareModal.jsx';
 import SourceDataPanel from '../components/dashboard/SourceDataPanel.jsx';
-import SummaryStats from '../components/dashboard/SummaryStats.jsx';
+import KpiGrid from '../components/dashboard/KpiGrid.jsx';
+import DashboardFilters from '../components/dashboard/DashboardFilters.jsx';
 import SectionHeader from '../components/dashboard/SectionHeader.jsx';
 import ColumnUsageCard from '../components/dashboard/ColumnUsageCard.jsx';
+import DashboardSummaryBanner from '../components/dashboard/DashboardSummaryBanner.jsx';
 import { fmtDateTime } from '../utils/format.js';
+import { applyFilters } from '../utils/chartTransform.js';
 
 const PAGE_SIZE = 6;
 
@@ -23,6 +28,7 @@ export default function DashboardViewPage() {
   const [sheet, setSheet] = useState(null);
   const [shareOpen, setShareOpen] = useState(false);
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+  const [filters, setFilters] = useState([]);
 
   const load = useCallback(async () => {
     try {
@@ -35,6 +41,16 @@ export default function DashboardViewPage() {
   }, [id, toast]);
 
   useEffect(() => { load(); }, [load]);
+
+  // Debug log so we can verify the template path is being taken when a saved
+  // dashboard has layoutType + styleConfig persisted.
+  useEffect(() => {
+    if (dashboard?.layoutType) {
+      console.log('TEMPLATE USED:', dashboard.layoutType,
+        '| STYLE:', dashboard.styleConfig,
+        '| SLOTS:', dashboard.charts?.length || 0);
+    }
+  }, [dashboard?.layoutType, dashboard?.styleConfig, dashboard?.charts?.length]);
 
   useEffect(() => {
     if (!sheet?._id) return;
@@ -62,12 +78,16 @@ export default function DashboardViewPage() {
     }
   }
 
+  const rawRows = sheet?.rawData || [];
+  const rows = useMemo(() => applyFilters(rawRows, filters), [rawRows, filters]);
+
   if (!dashboard) return <div className="p-10 text-ink-500">Loading…</div>;
 
-  const rows = sheet?.rawData || [];
   const charts = dashboard.charts || [];
   const visible = charts.slice(0, visibleCount);
   const remaining = charts.length - visibleCount;
+  const noRawRows = rawRows.length === 0;
+  const filtersWipedAll = !noRawRows && rows.length === 0 && filters.length > 0;
 
   return (
     <div className="p-6 max-w-7xl mx-auto">
@@ -112,25 +132,134 @@ export default function DashboardViewPage() {
         </motion.div>
       ) : (
         <>
-          <SummaryStats sheet={sheet} />
+          <DashboardSummaryBanner sheet={sheet} dashboardId={id} />
 
-          <SectionHeader
-            title="Charts"
-            subtitle="Bar, line and pie charts for numeric and categorical data"
-          />
+          {noRawRows && (
+            <div className="mb-4 rounded-xl border border-amber-300/60 bg-amber-50 dark:bg-amber-500/10 dark:border-amber-500/30 px-4 py-3 text-[13px] text-amber-800 dark:text-amber-200 flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+              <div>
+                <div className="font-semibold">Sheet has no rows yet</div>
+                <div className="opacity-80 mt-0.5">
+                  Try refreshing the source — your charts will appear once data is available.
+                </div>
+                <button onClick={refresh} className="btn-secondary mt-2 text-xs py-1 px-2">
+                  <RefreshCw className="w-3 h-3" /> Refresh sheet
+                </button>
+              </div>
+            </div>
+          )}
 
-          <motion.div layout className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {visible.map((c) => (
-              <ChartCard
-                key={c.id}
-                chart={c}
-                rows={rows}
-                height={300}
-                sheetTitle={sheet?.title}
-                onEdit={() => navigate(`/app/dashboards/${id}/edit`)}
+          {filtersWipedAll && (
+            <div className="mb-4 rounded-xl border border-amber-300/60 bg-amber-50 dark:bg-amber-500/10 dark:border-amber-500/30 px-4 py-3 text-[13px] text-amber-800 dark:text-amber-200 flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+              <div>
+                <div className="font-semibold">Filters return 0 rows</div>
+                <div className="opacity-80 mt-0.5">
+                  Clear or widen filters above to see chart data.
+                </div>
+                <button onClick={() => setFilters([])} className="btn-secondary mt-2 text-xs py-1 px-2">
+                  Clear all filters
+                </button>
+              </div>
+            </div>
+          )}
+
+          <DashboardFilters sheet={sheet} filters={filters} onChange={setFilters} />
+
+          {/* Raw-HTML / URL template: render the snapshotted artifact via
+              sandboxed iframe. The chart pipeline isn't used here — the
+              iframe is the renderer and the user's original UI shows. */}
+          {dashboard.templateType === 'html' && dashboard.templateCode ? (
+            <div className="rounded-2xl border border-ink-200/60 dark:border-ink-800/60 overflow-hidden bg-white dark:bg-ink-950" style={{ height: '80vh' }}>
+              <TemplateIframe html={dashboard.templateCode} title={dashboard.title} height="100%" rounded={false} />
+            </div>
+          ) : dashboard.templateType === 'url' && dashboard.templateUrl ? (
+            <div className="rounded-2xl border border-ink-200/60 dark:border-ink-800/60 overflow-hidden bg-white dark:bg-ink-950" style={{ height: '80vh' }}>
+              <TemplateIframe url={dashboard.templateUrl} title={dashboard.title} height="100%" rounded={false} />
+            </div>
+          ) : dashboard.layoutType ? (
+            <TemplateLayout
+              layoutType={dashboard.layoutType}
+              styleConfig={dashboard.styleConfig}
+              kpis={Array.isArray(dashboard.kpis) ? dashboard.kpis : []}
+              insights={Array.isArray(dashboard.insights) ? dashboard.insights : []}
+              entries={visible.map((c) => ({
+                chart: c,
+                rows,
+                meta: { simpleTitle: c.title, explanation: c.config?.explanation },
+                hero: Boolean(c.config?.hero),
+              }))}
+            />
+          ) : (
+            <>
+              <KpiGrid sheet={sheet} filters={filters} />
+
+              {Array.isArray(dashboard.insights) && dashboard.insights.length > 0 && (
+                <section className="mt-6">
+                  <div className="flex items-center gap-2 text-[11px] uppercase tracking-wider font-bold text-ink-600 dark:text-ink-300 mb-2">
+                    <Lightbulb className="w-3.5 h-3.5 text-amber-500" /> 💡 Key Insights
+                  </div>
+                  <div className="rounded-2xl border border-amber-200/60 dark:border-amber-500/15 bg-gradient-to-br from-amber-50/70 via-white/90 to-white/85 dark:from-amber-500/[0.06] dark:via-ink-900/40 dark:to-ink-900/30 backdrop-blur px-5 py-4 shadow-sm">
+                    <ul className="space-y-3.5">
+                      {dashboard.insights.map((line, i) => (
+                        <li key={i} className="flex gap-3 text-sm leading-7">
+                          <span className="mt-2 inline-block w-1.5 h-1.5 rounded-full bg-gradient-to-r from-brand-500 to-purple-500 flex-shrink-0" />
+                          <span className="text-ink-700 dark:text-ink-200">{line}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                </section>
+              )}
+
+              <SectionHeader
+                title="Charts"
+                subtitle="Headline chart on top, supporting views below"
               />
-            ))}
-          </motion.div>
+
+              {visible[0]?.config?.hero ? (
+            <>
+              <motion.div layout className="mb-4">
+                <ChartCard
+                  key={visible[0].id}
+                  chart={visible[0]}
+                  rows={rows}
+                  height={380}
+                  sheet={sheet}
+                  onEdit={() => navigate(`/app/dashboards/${id}/edit`)}
+                />
+              </motion.div>
+              {visible.length > 1 && (
+                <motion.div layout className="grid grid-cols-1 md:grid-cols-2 gap-4 auto-rows-fr">
+                  {visible.slice(1).map((c) => (
+                    <ChartCard
+                      key={c.id}
+                      chart={c}
+                      rows={rows}
+                      height={300}
+                      sheet={sheet}
+                      onEdit={() => navigate(`/app/dashboards/${id}/edit`)}
+                    />
+                  ))}
+                </motion.div>
+              )}
+            </>
+          ) : (
+            <motion.div layout className="grid grid-cols-1 md:grid-cols-2 gap-4 auto-rows-fr">
+              {visible.map((c) => (
+                <ChartCard
+                  key={c.id}
+                  chart={c}
+                  rows={rows}
+                  height={300}
+                  sheet={sheet}
+                  onEdit={() => navigate(`/app/dashboards/${id}/edit`)}
+                />
+              ))}
+            </motion.div>
+          )}
+            </>
+          )}
 
           {remaining > 0 && (
             <div className="mt-6 flex items-center justify-center">

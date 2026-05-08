@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 180" preserveAspectRatio="xMidYMid slice">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1e293b"/>
+      <stop offset="100%" stop-color="#0f172a"/>
+    </linearGradient>
+    <linearGradient id="hero" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0%" stop-color="#6366f1" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#6366f1" stop-opacity="0.5"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#6366f1"/>
+      <stop offset="100%" stop-color="#a855f7"/>
+    </linearGradient>
+  </defs>
+  <rect width="320" height="180" fill="url(#bg)"/>
+
+  <!-- KPI strip -->
+  <g transform="translate(12,12)">
+    <rect x="0"  y="0" rx="4" ry="4" width="56" height="22" fill="#ffffff" fill-opacity="0.06"/>
+    <rect x="62" y="0" rx="4" ry="4" width="56" height="22" fill="#ffffff" fill-opacity="0.06"/>
+    <rect x="124" y="0" rx="4" ry="4" width="56" height="22" fill="#ffffff" fill-opacity="0.06"/>
+    <rect x="186" y="0" rx="4" ry="4" width="56" height="22" fill="#ffffff" fill-opacity="0.06"/>
+    <!-- bold value bars -->
+    <rect x="6"   y="6" width="22" height="6" fill="#e2e8f0"/>
+    <rect x="68"  y="6" width="28" height="6" fill="#e2e8f0"/>
+    <rect x="130" y="6" width="20" height="6" fill="#e2e8f0"/>
+    <rect x="192" y="6" width="26" height="6" fill="#e2e8f0"/>
+    <!-- mini labels -->
+    <rect x="6"   y="16" width="34" height="3" fill="#94a3b8" fill-opacity="0.6"/>
+    <rect x="68"  y="16" width="38" height="3" fill="#94a3b8" fill-opacity="0.6"/>
+    <rect x="130" y="16" width="30" height="3" fill="#94a3b8" fill-opacity="0.6"/>
+    <rect x="192" y="16" width="34" height="3" fill="#94a3b8" fill-opacity="0.6"/>
+  </g>
+
+  <!-- Hero line chart -->
+  <g transform="translate(12,42)">
+    <rect width="296" height="58" rx="6" ry="6" fill="#ffffff" fill-opacity="0.05"/>
+    <!-- area fill -->
+    <path d="M8 46 L40 38 L72 30 L104 32 L136 22 L168 18 L200 12 L232 16 L264 10 L288 14 L288 50 L8 50 Z" fill="url(#hero)"/>
+    <!-- stroke -->
+    <path d="M8 46 L40 38 L72 30 L104 32 L136 22 L168 18 L200 12 L232 16 L264 10 L288 14" stroke="url(#accent)" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <!-- title bar -->
+    <rect x="8" y="6" width="60" height="4" fill="#e2e8f0"/>
+  </g>
+
+  <!-- Bottom row: bar + donut + area -->
+  <g transform="translate(12,108)">
+    <!-- Bar chart card -->
+    <rect width="92" height="60" rx="6" ry="6" fill="#ffffff" fill-opacity="0.05"/>
+    <rect x="6" y="6" width="40" height="3" fill="#e2e8f0"/>
+    <g transform="translate(8,18)">
+      <rect x="0"  y="22" width="10" height="22" fill="#6366f1"/>
+      <rect x="14" y="14" width="10" height="30" fill="#6366f1"/>
+      <rect x="28" y="6"  width="10" height="38" fill="#6366f1"/>
+      <rect x="42" y="18" width="10" height="26" fill="#a855f7"/>
+      <rect x="56" y="26" width="10" height="18" fill="#a855f7"/>
+      <rect x="70" y="32" width="10" height="12" fill="#a855f7"/>
+    </g>
+
+    <!-- Donut card -->
+    <g transform="translate(102,0)">
+      <rect width="92" height="60" rx="6" ry="6" fill="#ffffff" fill-opacity="0.05"/>
+      <rect x="6" y="6" width="40" height="3" fill="#e2e8f0"/>
+      <g transform="translate(46,32)">
+        <circle r="18" fill="none" stroke="#6366f1" stroke-width="6" stroke-dasharray="50 113"/>
+        <circle r="18" fill="none" stroke="#a855f7" stroke-width="6" stroke-dasharray="30 113" stroke-dashoffset="-50"/>
+        <circle r="18" fill="none" stroke="#06b6d4" stroke-width="6" stroke-dasharray="20 113" stroke-dashoffset="-80"/>
+        <circle r="18" fill="none" stroke="#94a3b8" stroke-width="6" stroke-dasharray="13 113" stroke-dashoffset="-100"/>
+      </g>
+    </g>
+
+    <!-- Area card -->
+    <g transform="translate(204,0)">
+      <rect width="92" height="60" rx="6" ry="6" fill="#ffffff" fill-opacity="0.05"/>
+      <rect x="6" y="6" width="40" height="3" fill="#e2e8f0"/>
+      <path d="M8 50 L20 42 L32 44 L44 36 L56 30 L68 32 L80 24 L84 22 L84 54 L8 54 Z" fill="url(#hero)"/>
+      <path d="M8 50 L20 42 L32 44 L44 36 L56 30 L68 32 L80 24 L84 22" stroke="url(#accent)" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+  </g>
+</svg>

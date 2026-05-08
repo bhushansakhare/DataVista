@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Sheet, Plus, RefreshCw, Trash2, Database, ArrowRight, Columns3 } from 'lucide-react';
+import {
+  Sheet, Plus, RefreshCw, Trash2, Database, ArrowRight, Columns3,
+  Sparkles, ExternalLink,
+} from 'lucide-react';
 import api from '../api/client.js';
 import { useToast } from '../context/ToastContext.jsx';
 import { CardSkeleton } from '../components/ui/Skeleton.jsx';
@@ -8,11 +11,13 @@ import EmptyState from '../components/ui/EmptyState.jsx';
 import { fmtDateTime } from '../utils/format.js';
 import Modal from '../components/ui/Modal.jsx';
 import ColumnSelector from '../components/sheet/ColumnSelector.jsx';
+import AiSuggestionsModal from '../components/ai/AiSuggestionsModal.jsx';
 
 export default function SheetsPage() {
   const [sheets, setSheets] = useState(null);
   const [editing, setEditing] = useState(null); // {sheet, selected}
   const [savingCols, setSavingCols] = useState(false);
+  const [aiSheet, setAiSheet] = useState(null); // sheet summary for AI modal
   const toast = useToast();
   const navigate = useNavigate();
 
@@ -121,11 +126,31 @@ export default function SheetsPage() {
                     <span className="chip">{(s.columns || []).length} cols</span>
                     <span>last sync {fmtDateTime(s.lastSyncedAt)}</span>
                   </div>
+                  {s.sheetUrl && (
+                    <a
+                      href={s.sheetUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="mt-2 inline-flex items-center gap-1 text-xs text-brand-600 hover:text-brand-700 hover:underline truncate max-w-full"
+                      title={s.sheetUrl}
+                    >
+                      <ExternalLink className="w-3 h-3 flex-shrink-0" />
+                      <span className="truncate">{shortenSheetUrl(s.sheetUrl)}</span>
+                    </a>
+                  )}
                 </div>
               </div>
-              <div className="mt-4 flex items-center gap-2">
-                <button onClick={() => navigate(`/app/dashboards/new/${s._id}`)} className="btn-primary flex-1">
-                  Build dashboard <ArrowRight className="w-4 h-4" />
+
+              <button
+                onClick={() => setAiSheet(s)}
+                className="mt-4 w-full inline-flex items-center justify-center gap-2 rounded-xl px-3 py-2.5 text-sm font-semibold bg-gradient-to-r from-brand-500 to-purple-500 text-white hover:opacity-95 transition shadow-sm"
+              >
+                <Sparkles className="w-4 h-4" /> Generate AI Dashboard
+              </button>
+
+              <div className="mt-2 flex items-center gap-2">
+                <button onClick={() => navigate(`/app/dashboards/new/${s._id}`)} className="btn-secondary flex-1">
+                  Build manually <ArrowRight className="w-4 h-4" />
                 </button>
                 <button onClick={() => openColumnEditor(s)} className="btn-secondary p-2.5" title="Manage columns">
                   <Columns3 className="w-4 h-4" />
@@ -166,6 +191,24 @@ export default function SheetsPage() {
           />
         )}
       </Modal>
+
+      <AiSuggestionsModal
+        open={!!aiSheet}
+        onClose={() => setAiSheet(null)}
+        sheetSummary={aiSheet}
+      />
     </div>
   );
+}
+
+function shortenSheetUrl(u) {
+  try {
+    const parsed = new URL(u);
+    const host = parsed.hostname.replace(/^www\./, '');
+    const path = parsed.pathname.length > 1 ? parsed.pathname : '';
+    const trimmed = `${host}${path}`;
+    return trimmed.length > 48 ? `${trimmed.slice(0, 47)}…` : trimmed;
+  } catch {
+    return u.length > 50 ? `${u.slice(0, 49)}…` : u;
+  }
 }

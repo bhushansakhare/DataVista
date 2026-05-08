@@ -144,14 +144,60 @@ export function coerceRows(rows, types) {
   });
 }
 
+/**
+ * Replace empty/blank/__EMPTY* column headers with deterministic placeholder
+ * names ("Column_1", "Column_2", …). Prevents the AI and the UI from ever
+ * seeing the parser's internal `__EMPTY` token (which xlsx / Papa emit when
+ * a header row has blank cells).
+ *
+ * Returns { columns, rename } — `rename` maps each ORIGINAL header to its
+ * cleaned name so callers can remap row keys.
+ */
+export function cleanColumns(rawColumns) {
+  const seen = new Map();
+  const columns = [];
+  const rename = {};
+  rawColumns.forEach((raw, i) => {
+    const original = String(raw ?? '').trim();
+    const isEmpty = !original || /^__EMPTY(?:_\d+)?$/i.test(original);
+    let name = isEmpty ? `Column_${i + 1}` : original;
+    // De-duplicate: if the cleaned name collides with one already used, suffix it.
+    if (seen.has(name)) {
+      const n = seen.get(name) + 1;
+      seen.set(name, n);
+      name = `${name}_${n}`;
+    } else {
+      seen.set(name, 1);
+    }
+    columns.push(name);
+    rename[raw] = name;
+  });
+  return { columns, rename };
+}
+
+/** Remap each row's keys from the original column headers to the cleaned ones. */
+export function renameRowKeys(rows, rename) {
+  if (!rows || rows.length === 0) return rows;
+  return rows.map((row) => {
+    const out = {};
+    for (const k of Object.keys(row)) {
+      const newKey = Object.prototype.hasOwnProperty.call(rename, k) ? rename[k] : k;
+      out[newKey] = row[k];
+    }
+    return out;
+  });
+}
+
 export function parseCsv(csv) {
   const result = Papa.parse(csv, { header: true, skipEmptyLines: true, dynamicTyping: false });
   if (result.errors && result.errors.length) {
     const firstFatal = result.errors.find((e) => e.type === 'Quotes' || e.type === 'FieldMismatch');
     if (firstFatal) console.warn('[csv-parse]', firstFatal);
   }
-  const rows = result.data || [];
-  const columns = result.meta && result.meta.fields ? result.meta.fields.filter(Boolean) : [];
+  const rawRows = result.data || [];
+  const rawColumns = result.meta && result.meta.fields ? result.meta.fields.filter(Boolean) : [];
+  const { columns, rename } = cleanColumns(rawColumns);
+  const rows = renameRowKeys(rawRows, rename);
   const types = detectTypes(rows, columns);
   const coerced = coerceRows(rows, types);
   return { rows: coerced, columns, types };

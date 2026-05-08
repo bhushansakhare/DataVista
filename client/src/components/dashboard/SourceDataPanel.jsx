@@ -3,19 +3,38 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { ChevronDown, FileText, Search, Hash, Type, Calendar, ExternalLink } from 'lucide-react';
 import Modal from '../ui/Modal.jsx';
 import { detectUnit, getFormatter } from '../../utils/formatValue.js';
+import {
+  formatBytesTotal, formatDurationTotal, formatCurrencyTotal, formatNumberTotal,
+  getColumnKindMap,
+} from '../../utils/businessKpis.js';
 
 const PAGE_SIZE = 25;
 const TYPE_ICONS = { number: Hash, string: Type, date: Calendar };
-const URL_RE = /^https?:\/\/\S+$/i;
+
+// Match common URL patterns:
+//  - http(s):// anything
+//  - protocol-less domain like "drive.google.com/..." or "www.example.com/..."
+//  - file:// schemes
+const URL_RE = /^(https?:\/\/|file:\/\/|www\.|[a-z0-9-]+\.[a-z]{2,}\/)\S*$/i;
+const URL_NAME_HINT = /\b(url|link|href|file|drive|source|page|website|video[_ ]?url|preview)\b/i;
 
 function isUrl(v) {
   if (typeof v !== 'string') return false;
-  return URL_RE.test(v.trim());
+  const s = v.trim();
+  if (s.length < 6) return false;
+  return URL_RE.test(s);
+}
+
+function asHref(v) {
+  const s = String(v).trim();
+  if (/^https?:\/\//i.test(s) || /^file:\/\//i.test(s)) return s;
+  return `https://${s.replace(/^\/+/, '')}`;
 }
 
 function shortenUrl(u) {
   try {
-    const parsed = new URL(u);
+    const target = /^https?:\/\//i.test(u) ? u : `https://${u}`;
+    const parsed = new URL(target);
     const host = parsed.hostname.replace(/^www\./, '');
     const path = parsed.pathname.length > 1 ? parsed.pathname : '';
     const trimmed = `${host}${path}`;
@@ -39,16 +58,42 @@ export default function SourceDataPanel({ sheet, defaultOpen = false }) {
   const visible = allCols.filter((c) => selected.includes(c));
   const rows = sheet?.rawData || [];
 
-  // Per-column formatter (so MB/GB units appear in the table too)
+  const kindMap = useMemo(() => getColumnKindMap(sheet), [sheet]);
+
+  // Per-column formatter — prefer the businessKpis kind classification (which
+  // handles server-coerced byte/duration columns) and fall back to the
+  // older detectUnit() for everything else.
   const fmts = useMemo(() => {
     const map = {};
     for (const c of visible) {
+      const kind = kindMap[c];
+      if (kind === 'bytes')    { map[c] = formatBytesTotal; continue; }
+      if (kind === 'duration') { map[c] = formatDurationTotal; continue; }
+      if (kind === 'currency') { map[c] = formatCurrencyTotal; continue; }
       const samples = rows.slice(0, 50).map((r) => r[c]);
       const unit = types[c] === 'number' ? detectUnit(c, samples) : null;
-      map[c] = unit ? getFormatter(unit) : null;
+      map[c] = unit ? getFormatter(unit) : (types[c] === 'number' ? formatNumberTotal : null);
     }
     return map;
-  }, [visible, rows, types]);
+  }, [visible, rows, types, kindMap]);
+
+  // Columns that should render as clickable links (sample values + name hint)
+  const urlCols = useMemo(() => {
+    const set = new Set();
+    for (const c of visible) {
+      if (URL_NAME_HINT.test(c)) { set.add(c); continue; }
+      // Sample-based detection: ≥50% of non-empty values look like URLs
+      let total = 0, hits = 0;
+      for (let i = 0; i < rows.length && total < 30; i++) {
+        const v = rows[i]?.[c];
+        if (v === null || v === undefined || v === '') continue;
+        total++;
+        if (isUrl(v)) hits++;
+      }
+      if (total > 0 && hits / total >= 0.5) set.add(c);
+    }
+    return set;
+  }, [rows, visible]);
 
   const filtered = useMemo(() => {
     if (!q.trim()) return rows;
@@ -68,18 +113,19 @@ export default function SourceDataPanel({ sheet, defaultOpen = false }) {
   function renderCell(row, col) {
     const v = row[col];
     if (v === null || v === undefined || v === '') return <span className="text-ink-400">—</span>;
-    if (isUrl(v)) {
+    if ((urlCols.has(col) || isUrl(v)) && typeof v === 'string') {
+      const trimmed = v.trim();
       return (
         <a
-          href={String(v).trim()}
+          href={asHref(trimmed)}
           target="_blank"
           rel="noopener noreferrer"
           onClick={(e) => e.stopPropagation()}
           className="inline-flex items-center gap-1 text-brand-600 hover:text-brand-700 hover:underline max-w-[280px]"
-          title={String(v)}
+          title={trimmed}
         >
           <ExternalLink className="w-3 h-3 flex-shrink-0" />
-          <span className="truncate">{shortenUrl(String(v).trim())}</span>
+          <span className="truncate">{shortenUrl(trimmed)}</span>
         </a>
       );
     }

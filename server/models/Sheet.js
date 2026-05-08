@@ -4,8 +4,12 @@ const sheetSchema = new mongoose.Schema(
   {
     workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', required: true, index: true },
     ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-    sheetUrl: { type: String, required: true },
-    sheetKey: { type: String, required: true, index: true },
+    // Where the data came from. 'google' has sheetUrl + sheetKey + gid set
+    // and supports `/refresh`. 'upload' is a one-shot CSV/XLSX import — those
+    // fields are absent and refresh is a no-op.
+    source: { type: String, enum: ['google', 'upload'], default: 'google', index: true },
+    sheetUrl: { type: String, default: '' },
+    sheetKey: { type: String, default: '', index: true },
     gid: { type: String, default: '0' },
     title: { type: String, default: 'Untitled sheet' },
     rawData: { type: Array, default: [] },

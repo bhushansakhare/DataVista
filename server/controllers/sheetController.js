@@ -1,5 +1,8 @@
 import Sheet from '../models/Sheet.js';
-import { parseSheetUrl, fetchCsv, parseCsv, hashContent } from '../utils/sheetParser.js';
+import {
+  parseSheetUrl, fetchCsv, parseCsv, hashContent,
+  cleanColumns, renameRowKeys, detectTypes, coerceRows,
+} from '../utils/sheetParser.js';
 
 export async function importSheet(req, res, next) {
   try {
@@ -62,10 +65,65 @@ export async function getSheet(req, res, next) {
   }
 }
 
+/**
+ * POST /api/sheet/upload — persist a CSV / XLSX upload as a real Sheet.
+ *
+ * The client parses the file (Papa / SheetJS), then sends `{ title, columns,
+ * rows }`. We re-run column cleaning, type detection, and value coercion
+ * server-side so the persisted shape matches a Google-imported sheet exactly.
+ *
+ * Uploaded sheets have no `sheetUrl` / `sheetKey` and `source: 'upload'`;
+ * `refreshSheet` is a no-op for them.
+ */
+export async function uploadSheet(req, res, next) {
+  try {
+    const { title, columns: rawColumns, rows: rawRows } = req.body || {};
+    if (!Array.isArray(rawColumns) || rawColumns.length === 0) {
+      return res.status(400).json({ error: 'columns is required and must be non-empty.' });
+    }
+    if (!Array.isArray(rawRows)) {
+      return res.status(400).json({ error: 'rows is required and must be an array.' });
+    }
+
+    // Re-clean headers server-side as a defense-in-depth — even if the client
+    // already cleaned them, this keeps Sheet docs consistent with the
+    // /import path's parseCsv pipeline.
+    const { columns, rename } = cleanColumns(rawColumns);
+    const renamed = renameRowKeys(rawRows, rename);
+    const types = detectTypes(renamed, columns);
+    const rows = coerceRows(renamed, types);
+
+    const sheet = await Sheet.create({
+      workspaceId: req.user.workspaceId,
+      ownerId: req.user._id,
+      source: 'upload',
+      sheetUrl: '',
+      sheetKey: '',
+      gid: '0',
+      title: (typeof title === 'string' && title.trim()) || 'Uploaded sheet',
+      rawData: rows,
+      columns,
+      selectedColumns: columns,
+      detectedTypes: types,
+      rowCount: rows.length,
+      contentHash: hashContent(JSON.stringify(rawRows)),
+      autoSync: false,
+      lastSyncedAt: new Date(),
+    });
+
+    res.status(201).json({ sheet });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function refreshSheet(req, res, next) {
   try {
     const sheet = await Sheet.findOne({ _id: req.params.id, workspaceId: req.user.workspaceId });
     if (!sheet) return res.status(404).json({ error: 'Sheet not found' });
+    // Uploaded sheets have no remote source to refresh from. Return the sheet
+    // unchanged so the UI's refresh button is a clean no-op rather than an error.
+    if (sheet.source === 'upload') return res.json({ sheet });
     const csv = await fetchCsv(sheet.sheetKey, sheet.gid);
     const { rows, columns, types } = parseCsv(csv);
     const contentHash = hashContent(csv);

@@ -1,11 +1,20 @@
 import jwt from 'jsonwebtoken';
+import bcrypt from 'bcryptjs';
 import User from '../models/User.js';
 import Workspace from '../models/Workspace.js';
 
 function signToken(user) {
-  return jwt.sign({ id: user._id, role: user.role }, process.env.JWT_SECRET, {
-    expiresIn: process.env.JWT_EXPIRES || '7d',
-  });
+  const secret = process.env.JWT_SECRET;
+  if (!secret) {
+    const err = new Error('Server misconfigured: JWT_SECRET missing');
+    err.status = 500;
+    throw err;
+  }
+  return jwt.sign(
+    { id: user._id.toString(), role: user.role },
+    secret,
+    { expiresIn: process.env.JWT_EXPIRES || '7d' }
+  );
 }
 
 export async function register(req, res, next) {
@@ -37,17 +46,39 @@ export async function register(req, res, next) {
 
 export async function login(req, res, next) {
   try {
-    const { email, password } = req.body;
-    if (!email || !password) return res.status(400).json({ error: 'email and password are required' });
-    const user = await User.findOne({ email: String(email).toLowerCase() });
-    if (!user) return res.status(401).json({ error: 'Invalid credentials' });
-    const ok = await user.compare(password);
-    if (!ok) return res.status(401).json({ error: 'Invalid credentials' });
+    const body = req.body || {};
+    const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
+    const password = typeof body.password === 'string' ? body.password : '';
+
+    if (!email || !password) {
+      return res.status(400).json({ error: 'email and password are required' });
+    }
+
+    const user = await User.findOne({ email });
+    if (!user || !user.password) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    let ok = false;
+    try {
+      ok = await bcrypt.compare(password, user.password);
+    } catch {
+      ok = false;
+    }
+    if (!ok) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
     const token = signToken(user);
-    const workspace = user.workspaceId ? await Workspace.findById(user.workspaceId) : null;
-    res.json({ token, user, workspace });
+    let workspace = null;
+    if (user.workspaceId) {
+      workspace = await Workspace.findById(user.workspaceId).catch(() => null);
+    }
+
+    return res.json({ token, user, workspace });
   } catch (err) {
-    next(err);
+    console.error('[login]', err);
+    return next(err);
   }
 }
 

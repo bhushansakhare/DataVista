@@ -38,6 +38,28 @@ const dashboardSchema = new mongoose.Schema(
     title: { type: String, default: 'Untitled dashboard' },
     description: { type: String, default: '' },
     charts: { type: [chartSchema], default: [] },
+    // AI-generated insights ("WHAT + WHY" bullets). Persisted so the saved
+    // dashboard view can render the same Key Insights block as the preview.
+    insights: { type: [String], default: [] },
+    // When the dashboard was generated from a template, the template id is
+    // stored here so the saved view can show a "Built from <template>" badge.
+    templateId: { type: String, default: '', index: true },
+    // For HTML / URL templates, the resolved/rendered version is snapshot
+    // here so the saved dashboard renders even if the source template is
+    // later edited or deleted.
+    templateType: { type: String, enum: ['', 'slots', 'html', 'url'], default: '' },
+    templateCode: { type: String, default: '' },
+    templateUrl:  { type: String, default: '' },
+    // Snapshot of the template's layout + style at save time. The saved
+    // dashboard renders the same way even if the template is later edited
+    // or deleted.
+    layoutType:  { type: String, enum: ['hero-grid', 'dense-grid', 'sidebar', ''], default: '' },
+    styleConfig: {
+      density:   { type: String, default: '' },
+      cardStyle: { type: String, default: '' },
+      accent:    { type: String, default: '' },
+      mode:      { type: String, default: '' },
+    },
     layout: { type: String, default: 'grid' },
     theme: { type: String, default: 'light' },
   },
