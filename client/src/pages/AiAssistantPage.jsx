@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Sparkles, MessageSquare, FileSpreadsheet, Link2, LayoutTemplate, X } from 'lucide-react';
+import { Link, Navigate, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
+import { Sparkles, MessageSquare, FileSpreadsheet, Link2, LayoutTemplate, X, KeyRound } from 'lucide-react';
 import api from '../api/client.js';
+import { useAuth } from '../context/AuthContext.jsx';
 import { useToast } from '../context/ToastContext.jsx';
 import ChatMessage from '../components/ai/ChatMessage.jsx';
 import ChatInput from '../components/ai/ChatInput.jsx';
@@ -24,8 +25,18 @@ import { aiSuggestionToDashboard } from '../utils/aiToChart.js';
  */
 export default function AiAssistantPage() {
   const navigate = useNavigate();
+  const location = useLocation();
   const toast = useToast();
+  const { user, refresh } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
+
+  // Block the page when neither a user key nor a fallback env key is
+  // available. The `aiKeys` field on `req.user` is `{ hasOpenai, hasClaude }`
+  // (booleans only — the encrypted blob never leaves the server).
+  const hasUserKey = Boolean(user?.aiKeys?.hasOpenai || user?.aiKeys?.hasClaude);
+  if (user && !hasUserKey) {
+    return <NoAiKeysBlock />;
+  }
 
   const [messages, setMessages] = useState(() => [welcomeMessage()]);
   const [sheet, setSheet] = useState(null);          // Sheet (persisted) or ephemeral (file upload)
@@ -108,6 +119,68 @@ export default function AiAssistantPage() {
     pushMessage({ role: 'user', content: text });
     await generateFromQuery(text);
   }
+
+  /**
+   * Ingest rows already in memory (e.g. from an Integration Hub fetch).
+   * Mirrors handleFile: persist via /sheet/upload, then trigger AI gen.
+   */
+  async function handleIngestRows(rows, name) {
+    pushMessage({
+      role: 'user',
+      content: `Loaded ${rows.length.toLocaleString()} rows from ${name}`,
+      attachment: 'sheet',
+      attachmentLabel: 'INTEGRATION',
+    });
+    pushMessage({ role: 'thinking', content: 'Saving data…' });
+    try {
+      const columns = rows[0] && typeof rows[0] === 'object' ? Object.keys(rows[0]) : [];
+      let s;
+      try {
+        const { data } = await api.post('/sheet/upload', { title: name, columns, rows });
+        s = data.sheet;
+      } catch (uploadErr) {
+        const status = uploadErr?.response?.status;
+        toast.error(status === 413
+          ? 'Data too large — preview-only this session.'
+          : 'Save failed — preview-only this session.');
+        s = buildEphemeralSheet({ title: name, rows, columns });
+      }
+      setSheet(s);
+      const persisted = !String(s._id).startsWith('eph-');
+      replaceLastThinking({
+        role: 'assistant',
+        content: `Loaded **${name}** — ${rows.length.toLocaleString()} rows across ${columns.length} columns. ` +
+          (persisted ? 'Saved to your workspace. Generating dashboard…' : 'Preview only. Generating dashboard…'),
+      });
+      await generateFromQuery('Build the most useful analytical dashboard for this dataset.');
+    } catch (err) {
+      replaceLastThinking({
+        role: 'error',
+        title: 'Could not ingest rows',
+        content: err?.message || 'Try again.',
+      });
+    }
+  }
+
+  // When the page is opened via the Integration Hub's "Fetch data" handler,
+  // location.state carries the rows. Accepts either `fetchedRows` (our
+  // internal alias used by IntegrationsPage) or `sheetData` (the public
+  // contract documented for external callers). Run the ingest pipeline once
+  // on mount, then clear the state so a refresh / back-nav doesn't re-fire it.
+  useEffect(() => {
+    const incoming = location.state;
+    const rows = Array.isArray(incoming?.fetchedRows) && incoming.fetchedRows.length > 0
+      ? incoming.fetchedRows
+      : Array.isArray(incoming?.sheetData) && incoming.sheetData.length > 0
+        ? incoming.sheetData
+        : null;
+    if (rows && !sheet) {
+      const name = incoming.fetchedName || incoming.sheetName || 'Imported data';
+      handleIngestRows(rows, name);
+      navigate(location.pathname, { replace: true, state: null });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.state]);
 
   async function handleFile(file) {
     pushMessage({
@@ -254,6 +327,10 @@ export default function AiAssistantPage() {
       });
       setGenerated(data);
       setSavedDashboardId(null);
+      // Sync user state so the credit badge in the header reflects the
+      // deduction immediately — without this the user only sees the new
+      // balance on next page navigation.
+      refresh?.().catch(() => {});
       const chartCount = Array.isArray(data?.charts) ? data.charts.length : 0;
       const kpiCount = Array.isArray(data?.kpis) ? data.kpis.length : 0;
       replaceLastThinking({
@@ -290,7 +367,39 @@ export default function AiAssistantPage() {
     setActionBusy((b) => ({ ...b, use: true }));
     try {
       const payload = aiSuggestionToDashboard(generated, sheet);
-      if (!payload.charts.length) throw new Error('No chartable columns to save.');
+      // If the AI produced nothing chartable, synthesize a fallback chart so
+      // the dashboard is always saveable. The deterministic engine on the
+      // backend will fill in real values from the sheet at render time.
+      if (!payload.charts.length) {
+        const columns = Array.isArray(sheet?.columns) ? sheet.columns : [];
+        if (columns.length >= 2) {
+          payload.charts = [{
+            id: `fallback-${Date.now().toString(36)}`,
+            type: 'bar',
+            title: `${columns[1]} by ${columns[0]}`,
+            xField: columns[0],
+            yField: columns[1],
+            yFields: [columns[1]],
+            groupBy: '',
+            aggregation: 'count',
+            filters: [],
+            config: { hero: true, fallback: true },
+          }];
+        } else if (columns.length === 1) {
+          payload.charts = [{
+            id: `fallback-${Date.now().toString(36)}`,
+            type: 'bar',
+            title: `Count by ${columns[0]}`,
+            xField: columns[0],
+            yField: columns[0],
+            yFields: [columns[0]],
+            groupBy: '',
+            aggregation: 'count',
+            filters: [],
+            config: { hero: true, fallback: true },
+          }];
+        }
+      }
       const { data } = await api.post('/dashboard', payload);
       setSavedDashboardId(data.dashboard._id);
       toast.success('Dashboard saved');
@@ -483,6 +592,27 @@ export default function AiAssistantPage() {
         onClose={() => setShareOpen(false)}
         dashboardId={savedDashboardId}
       />
+    </div>
+  );
+}
+
+/* ─── no-keys block ─── */
+
+function NoAiKeysBlock() {
+  return (
+    <div className="h-full flex items-center justify-center p-6">
+      <div className="card p-8 max-w-md text-center">
+        <div className="w-12 h-12 mx-auto rounded-2xl bg-gradient-to-br from-brand-500 to-purple-500 flex items-center justify-center">
+          <KeyRound className="w-6 h-6 text-white" />
+        </div>
+        <div className="font-bold text-lg mt-4">Add your API key to use AI</div>
+        <p className="text-sm text-ink-500 mt-2 leading-relaxed">
+          Each user uses their own OpenAI or Claude API key. Add at least one in Settings to unlock the AI Assistant.
+        </p>
+        <Link to="/app/settings" className="btn-primary mt-5 inline-flex">
+          <KeyRound className="w-4 h-4" /> Open Settings
+        </Link>
+      </div>
     </div>
   );
 }

@@ -1,7 +1,8 @@
 import { Router } from 'express';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import {
-  stats, listUsers, listWorkspaces, updateUserRole, updateWorkspacePlan,
+  stats, listUsers, listWorkspaces, updateUserRole, updateWorkspacePlan, deleteUser,
+  sendExpiryReminder,
 } from '../controllers/adminController.js';
 
 const r = Router();
@@ -11,4 +12,6 @@ r.get('/users', listUsers);
 r.get('/workspaces', listWorkspaces);
 r.patch('/users/:id/role', updateUserRole);
 r.patch('/workspaces/:id/plan', updateWorkspacePlan);
+r.delete('/users/:id', deleteUser);
+r.post('/send-reminder/:userId', sendExpiryReminder);
 export default r;

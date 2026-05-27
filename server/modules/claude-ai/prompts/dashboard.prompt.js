@@ -94,11 +94,15 @@ Return ONE JSON object with these top-level fields:
 {
   "title":   "string",
   "summary": "2–3 plain English sentences with real numbers from the data",
-  "theme":   "dark" | "light",
   "kpis":    [ { label, value, description, trend } ],
   "charts":  [ { simpleTitle, explanation, type, xField, yField } ],
   "insights":[ "WHAT + WHY" ]
 }
+
+THEME — DO NOT EMIT.
+- Do NOT include "theme", "mode", "dark", "light", "color", "palette", "accent",
+  or any UI / styling field. The frontend Theme Engine owns appearance; your
+  job is data only.
 
 No prose outside the JSON. No "data" arrays inside charts. Only real column names.
 

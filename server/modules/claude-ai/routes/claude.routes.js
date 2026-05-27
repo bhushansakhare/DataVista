@@ -2,16 +2,32 @@ import { Router } from 'express';
 import { generateSuggestions } from '../services/suggestion.engine.js';
 import { generateDashboard } from '../services/dashboard.generator.js';
 import { generateInsights } from '../services/insight.engine.js';
-import { isAiAvailable } from '../services/claude.service.js';
+import { isAiAvailable, userHasAiAccess } from '../services/claude.service.js';
 import { getTemplate as getBuiltInTemplate } from '../../templates/registry.js';
 import Template from '../../../models/Template.js';
+import { requireAuth } from '../../../middleware/auth.js';
+import { consumeCredits } from '../../../middleware/credits.js';
+
+// Block every AI route when the requester has no usable key (neither their
+// own nor a server-wide fallback). Returns 402 with a machine-readable
+// `code` the client can switch on to redirect to Settings.
+function requireAiAccess(req, res, next) {
+  if (userHasAiAccess(req.user)) return next();
+  return res.status(402).json({
+    error: 'Please add your OpenAI or Claude API key in Settings to use AI features.',
+    code: 'ai_key_missing',
+  });
+}
 
 const r = Router();
 
-/** Health probe — lets the frontend conditionally show "AI Generate" buttons. */
+// All AI routes are auth-gated AND key-gated. Status is the only exception
+// — the client uses it to decide which UI to show before the user has logged in.
 r.get('/status', (_req, res) => {
   res.json({ available: isAiAvailable(), model: process.env.CLAUDE_MODEL || 'claude-opus-4-7' });
 });
+
+r.use(requireAuth, requireAiAccess);
 
 /** POST /api/ai/suggestions — { sheetData } → { dashboards: [...], source } */
 r.post('/suggestions', async (req, res, next) => {
@@ -28,7 +44,7 @@ r.post('/suggestions', async (req, res, next) => {
 });
 
 /** POST /api/ai/generate-dashboard — { sheetData, userQuery, provider? } → full dashboard config */
-r.post('/generate-dashboard', async (req, res, next) => {
+r.post('/generate-dashboard', consumeCredits(1, 'AI dashboard generation'), async (req, res, next) => {
   try {
     const { sheetData, userQuery, provider, templateId } = req.body || {};
     console.log('REQ PROVIDER:', provider, 'TEMPLATE:', templateId || '—');
@@ -72,6 +88,7 @@ r.post('/generate-dashboard', async (req, res, next) => {
       userQuery: typeof userQuery === 'string' ? userQuery : '',
       provider: safeProvider,
       template,
+      user: req.user,
     });
     res.json(result);
   } catch (err) {

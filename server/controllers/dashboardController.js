@@ -1,6 +1,8 @@
 import Dashboard from '../models/Dashboard.js';
 import Sheet from '../models/Sheet.js';
 
+const THEME_MODES = ['light', 'dark'];
+
 export async function createDashboard(req, res, next) {
   try {
     const {
@@ -37,7 +39,7 @@ export async function createDashboard(req, res, next) {
       layoutType: validLayout,
       styleConfig: cleanStyle,
       layout: layout || 'grid',
-      theme: theme || 'light',
+      theme: THEME_MODES.includes(theme) ? theme : 'light',
     });
     res.status(201).json({ dashboard });
   } catch (err) {
@@ -72,6 +74,7 @@ export async function updateDashboard(req, res, next) {
     const updates = (({ title, description, charts, insights, layout, theme }) =>
       ({ title, description, charts, insights, layout, theme }))(req.body);
     Object.keys(updates).forEach((k) => updates[k] === undefined && delete updates[k]);
+    if (updates.theme !== undefined && !THEME_MODES.includes(updates.theme)) updates.theme = 'light';
     const dashboard = await Dashboard.findOneAndUpdate(
       { _id: req.params.id, workspaceId: req.user.workspaceId },
       updates,

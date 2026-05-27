@@ -9,14 +9,21 @@ import { Server as SocketServer } from 'socket.io';
 import rateLimit from 'express-rate-limit';
 
 import { connectDB } from './config/db.js';
+import passport from 'passport';
 import authRoutes from './routes/auth.js';
+import oauthRoutes from './routes/oauth.js';
 import sheetRoutes from './routes/sheet.js';
 import dashboardRoutes from './routes/dashboard.js';
 import shareRoutes from './routes/share.js';
 import adminRoutes from './routes/admin.js';
+import systemSettingsRoutes from './routes/systemSettings.js';
 import templatesRoutes from './routes/templates.js';
+import integrationsRoutes from './modules/integrations/integration.routes.js';
 import aiRoutes from './modules/claude-ai/index.js';
+import plansRoutes from './routes/plans.js';
+import paymentsRoutes from './routes/payments.js';
 import { startSheetPoller } from './services/sheetPoller.js';
+import { backfillReferralCodes } from './migrations/backfillReferralCodes.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -25,6 +32,7 @@ const PORT = process.env.PORT || 5000;
 const CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:5173';
 
 const app = express();
+app.set('trust proxy', 1);
 const server = http.createServer(app);
 
 const io = new SocketServer(server, {
@@ -42,6 +50,9 @@ app.set('io', io);
 app.use(cors({ origin: CLIENT_URL, credentials: true }));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
+// Passport handles OAuth strategies without session — JWTs are issued
+// directly in the OAuth callback and stored client-side.
+app.use(passport.initialize());
 
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -54,12 +65,17 @@ app.use('/api', apiLimiter);
 app.get('/api/health', (_req, res) => res.json({ ok: true, ts: Date.now() }));
 
 app.use('/api/auth', authRoutes);
+app.use('/api/auth', oauthRoutes);
 app.use('/api/sheet', sheetRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/share', shareRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/admin/system-settings', systemSettingsRoutes);
 app.use('/api/templates', templatesRoutes);
+app.use('/api/integrations', integrationsRoutes);
 app.use('/api/ai', aiRoutes);
+app.use('/api/plans', plansRoutes);
+app.use('/api/payments', paymentsRoutes);
 
 // ─── Static + SPA fallback ────────────────────────────────────────────────
 // Serves the built React app and routes non-API URLs (including /s/:token,
@@ -120,6 +136,11 @@ io.on('connection', (socket) => {
 });
 
 await connectDB(process.env.MONGO_URI);
+// Fire-and-forget — backfill must not block server start. If it errors,
+// it self-logs and the server still answers requests on fresh codes.
+backfillReferralCodes().catch((err) =>
+  console.warn('[startup] backfillReferralCodes:', err?.message),
+);
 server.listen(PORT, () => {
   console.log(`[sheetflow] api listening on :${PORT}`);
   startSheetPoller(io);

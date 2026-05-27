@@ -7,6 +7,7 @@ import {
 
 const r = Router();
 r.use(requireAuth);
+
 r.post('/', createDashboard);
 r.get('/', listDashboards);
 // /history must be declared before /:id so Express doesn't treat "history" as an :id.

@@ -13,7 +13,15 @@ import SharedDashboardPage from './pages/SharedDashboardPage.jsx';
 import SuperAdminPage from './pages/SuperAdminPage.jsx';
 import SheetsPage from './pages/SheetsPage.jsx';
 import AiAssistantPage from './pages/AiAssistantPage.jsx';
-import TemplatesPage from './pages/TemplatesPage.jsx';
+// TemplatesPage import removed — Auto Dashboard Builder replaces it.
+import SettingsPage from './pages/SettingsPage.jsx';
+import IntegrationsPage from './pages/IntegrationsPage.jsx';
+import OAuthSuccessPage from './pages/OAuthSuccessPage.jsx';
+import ForgotPasswordPage from './pages/ForgotPasswordPage.jsx';
+import ResetPasswordPage from './pages/ResetPasswordPage.jsx';
+import PricingPage from './pages/PricingPage.jsx';
+import SelectPlanPage from './pages/SelectPlanPage.jsx';
+import CheckoutPage from './pages/CheckoutPage.jsx';
 import AppLayout from './components/layout/AppLayout.jsx';
 
 function Protected({ children, role }) {
@@ -38,12 +46,23 @@ export default function App() {
       <Route path="/" element={<LandingPage />} />
       <Route path="/login" element={<LoginPage />} />
       <Route path="/register" element={<RegisterPage />} />
+      <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+      <Route path="/reset-password" element={<ResetPasswordPage />} />
+      <Route path="/pricing" element={<PricingPage />} />
       <Route path="/s/:token" element={<SharedDashboardPage />} />
+      <Route path="/oauth-success" element={<OAuthSuccessPage />} />
+      <Route path="/select-plan" element={<Protected><SelectPlanPage /></Protected>} />
+      <Route path="/checkout/:planId" element={<Protected><CheckoutPage /></Protected>} />
       <Route path="/onboarding" element={<Protected><OnboardingPage /></Protected>} />
       <Route element={<Protected><AppLayout /></Protected>}>
         <Route path="/app" element={<DashboardListPage />} />
         <Route path="/app/ai" element={<AiAssistantPage />} />
-        <Route path="/app/templates" element={<TemplatesPage />} />
+        {/* Templates UI removed. Legacy bookmark → AI Assistant. */}
+        <Route path="/app/templates" element={<Navigate to="/app/ai" replace />} />
+        {/* Auto Dashboard removed. Legacy bookmark → AI Assistant. */}
+        <Route path="/app/auto-dashboard" element={<Navigate to="/app/ai" replace />} />
+        <Route path="/app/integrations" element={<IntegrationsPage />} />
+        <Route path="/app/settings" element={<SettingsPage />} />
         <Route path="/app/sheets" element={<SheetsPage />} />
         <Route path="/app/sheets/import" element={<SheetImportPage />} />
         <Route path="/app/dashboards/new/:sheetId" element={<DashboardWizardPage />} />

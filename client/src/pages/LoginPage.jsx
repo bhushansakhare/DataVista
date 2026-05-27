@@ -4,6 +4,8 @@ import { motion } from 'framer-motion';
 import { Sparkles, ArrowRight } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.jsx';
 import { useToast } from '../context/ToastContext.jsx';
+import OAuthButtons from '../components/auth/OAuthButtons.jsx';
+import PasswordInput from '../components/ui/PasswordInput.jsx';
 
 export default function LoginPage() {
   const { login } = useAuth();
@@ -40,14 +42,36 @@ export default function LoginPage() {
         </Link>
         <h1 className="text-2xl font-bold">Welcome back</h1>
         <p className="text-sm text-ink-500 mt-1">Sign in to your workspace.</p>
-        <form onSubmit={onSubmit} className="mt-6 space-y-4">
+
+        <div className="mt-6">
+          <OAuthButtons mode="signin" />
+        </div>
+
+        <div className="my-5 flex items-center gap-3 text-[11px] uppercase tracking-wider font-bold text-ink-400">
+          <div className="flex-1 h-px bg-ink-200 dark:bg-ink-800" />
+          or with email
+          <div className="flex-1 h-px bg-ink-200 dark:bg-ink-800" />
+        </div>
+
+        <form onSubmit={onSubmit} className="space-y-4">
           <div>
             <label className="label">Email</label>
             <input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} className="input mt-1.5" placeholder="you@company.com" />
           </div>
           <div>
-            <label className="label">Password</label>
-            <input type="password" required value={password} onChange={(e) => setPassword(e.target.value)} className="input mt-1.5" placeholder="••••••••" />
+            <div className="flex items-center justify-between">
+              <label className="label">Password</label>
+              <Link to="/forgot-password" className="text-xs font-medium text-brand-600 hover:underline">
+                Forgot password?
+              </Link>
+            </div>
+            <PasswordInput
+              required
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="input mt-1.5 w-full"
+              placeholder="••••••••"
+            />
           </div>
           <button type="submit" disabled={busy} className="btn-primary w-full py-2.5 disabled:opacity-50">
             {busy ? 'Signing in…' : <>Sign in <ArrowRight className="w-4 h-4" /></>}

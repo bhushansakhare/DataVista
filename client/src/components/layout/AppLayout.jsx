@@ -2,9 +2,10 @@ import { Outlet, NavLink, Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext.jsx';
 import { useTheme } from '../../context/ThemeContext.jsx';
 import {
-  LayoutDashboard, Sheet, Plus, Shield, Sun, Moon, LogOut, Sparkles, Menu, X, Bot, LayoutTemplate,
+  LayoutDashboard, Sheet, Plus, Shield, Sun, Moon, LogOut, Sparkles, Menu, X, Bot, Settings as SettingsIcon, Plug,
 } from 'lucide-react';
 import { useState } from 'react';
+import AppHeader from './AppHeader.jsx';
 
 function NavItem({ to, icon: Icon, children, end }) {
   return (
@@ -62,7 +63,8 @@ export default function AppLayout() {
           <NavItem to="/app" icon={LayoutDashboard} end>Dashboards</NavItem>
           <NavItem to="/app/sheets" icon={Sheet}>Sheets</NavItem>
           <NavItem to="/app/ai" icon={Bot}>AI Assistant</NavItem>
-          <NavItem to="/app/templates" icon={LayoutTemplate}>Templates</NavItem>
+          <NavItem to="/app/integrations" icon={Plug}>Integrations</NavItem>
+          <NavItem to="/app/settings" icon={SettingsIcon}>Settings</NavItem>
           {user?.role === 'superadmin' && (
             <>
               <div className="px-3 pt-4 pb-1 label">Admin</div>
@@ -99,13 +101,16 @@ export default function AppLayout() {
 
       {/* Main */}
       <div className="flex-1 flex flex-col min-w-0">
-        <header className="lg:hidden glass border-b border-ink-200/60 dark:border-ink-800/60 px-4 py-3 flex items-center justify-between">
+        {/* Mobile sidebar opener — collapses on lg+ since the sidebar is permanent there */}
+        <div className="lg:hidden glass border-b border-ink-200/60 dark:border-ink-800/60 px-4 py-2 flex items-center justify-between">
           <button onClick={() => setOpen(true)} className="btn-ghost p-2">
             <Menu className="w-5 h-5" />
           </button>
           <div className="font-semibold text-sm">SheetFlow</div>
           <div className="w-9" />
-        </header>
+        </div>
+        {/* Global header with profile dropdown + logout */}
+        <AppHeader />
         <main className="flex-1 overflow-x-hidden">
           <Outlet />
         </main>

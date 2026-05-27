@@ -37,14 +37,13 @@ export default function PreviewPanel({
       '| STYLE:', generated.styleConfig,
       '| SLOTS:', charts.length);
   }
-  const dark = templateActive
-    ? generated.styleConfig?.mode === 'dark'
-    : generated.theme === 'dark';
+  // The AI no longer emits a theme field. Templates may still pin a mode
+  // via styleConfig.mode — honour that, otherwise default to light.
+  const dark = templateActive ? generated.styleConfig?.mode === 'dark' : false;
 
-  // Whole pane swaps to a deep navy gradient when dark mode is active.
   const shell = dark
     ? 'bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950 text-slate-100'
-    : 'bg-mesh-light text-ink-900';
+    : '';
 
   return (
     <div className={`h-full flex flex-col ${shell}`}>

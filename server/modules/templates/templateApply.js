@@ -1,27 +1,23 @@
-// Apply real sheet data into a raw-HTML template's data-* placeholders.
+// Template apply — RAW HTML mode.
 //
-// FLOW:
-//   1. Scan templateCode for `data-kpi="<name>"` and `data-chart="<name>"`
-//      attributes. Build a list of placeholder names.
-//   2. Send (placeholder list + dataset block) to the AI. AI returns a
-//      key→value map.
-//   3. Server string-replaces the inner content of each tagged element.
+// The AI's contract: respond with the FINAL HTML page. No JSON envelope,
+// no commentary, no fenced code block. Server takes the response text,
+// extracts the HTML body (with light tolerance for prose / code fences in
+// case the model strays), validates it isn't an echo of the input, and
+// returns it.
 //
-// IMPORTANT: We do NOT execute the user's HTML server-side. We do NOT
-// parse it as a real DOM (that would require jsdom and risks parser-driven
-// XSS). We use a tight, anchored regex to find tagged elements and replace
-// only their inner content. The original HTML structure is preserved
-// byte-for-byte everywhere except inside the matched elements.
+// Same validation gates as the previous turn protect against the
+// "AI returned identical HTML" failure: empty, identical, length out of
+// range, broken tag count → reject and fall back to original template.
 
-import { callStructured, isAiAvailable } from '../claude-ai/services/claude.service.js';
+import { callText, isAiAvailable } from '../claude-ai/services/claude.service.js';
+import { computeDashboardData } from './deterministicEngine.js';
+
+// ── Legacy placeholder discovery (kept for callers that still use it) ──────
 
 const KPI_RE   = /<([a-zA-Z][\w-]*)([^<>]*?\sdata-kpi=["']([^"']+)["'][^<>]*?)>([\s\S]*?)<\/\1>/g;
 const CHART_RE = /<([a-zA-Z][\w-]*)([^<>]*?\sdata-chart=["']([^"']+)["'][^<>]*?)>([\s\S]*?)<\/\1>/g;
 
-/**
- * Pull every data-kpi / data-chart name out of the template, as a
- * deduplicated set. Used to ask the AI for exactly the values it needs.
- */
 export function extractPlaceholders(html) {
   const kpis = new Set();
   const charts = new Set();
@@ -34,165 +30,181 @@ export function extractPlaceholders(html) {
   return { kpis: Array.from(kpis), charts: Array.from(charts) };
 }
 
-const SCHEMA = {
-  type: 'object',
-  properties: {
-    kpis: {
-      type: 'object',
-      description: 'Map of KPI placeholder name → display string (numbers formatted, currency / % included).',
-      additionalProperties: { type: 'string' },
-    },
-    charts: {
-      type: 'object',
-      description: 'Map of chart placeholder name → array of {name, value} data points the user can render.',
-      additionalProperties: {
-        type: 'array',
-        items: {
-          type: 'object',
-          properties: { name: { type: 'string' }, value: { type: 'number' } },
-          required: ['name', 'value'],
-          additionalProperties: false,
-        },
-      },
-    },
-  },
-  required: ['kpis', 'charts'],
-  additionalProperties: false,
-};
-
-const SYSTEM_PROMPT = `You inject real values into a dashboard template's placeholders.
-
-INPUT: the full template HTML, a list of placeholder names (KPIs and charts) found in it, and a sample of the user's spreadsheet.
-
-OUTPUT: a JSON object with two maps:
-  "kpis":   { "<name>": "<short string with units>", ... }
-  "charts": { "<name>": [ {"name":"...","value":N}, ... ], ... }
-
-YOUR JOB:
-- Look at WHERE each placeholder lives in the template HTML — the surrounding label, the heading, the icon, the column it's in. The placeholder name plus its visual context tells you what business value belongs there.
-- Pick the most meaningful column from the spreadsheet for each placeholder. Don't be literal: if the placeholder is named "kpi1" but it sits under a "Total Revenue" label and the data has a Sales column, return total Sales. Use the template's design intent.
-- KPI values are short, human-readable strings: "$142,180", "1,274", "38%", "27 min".
-- Chart values are arrays of {name, value} pairs. 5–10 entries each. Real numbers from the sample where possible; otherwise reasonable estimates that reflect the data's actual scale.
-- For every placeholder NAME in the input, produce a value. Don't add extra keys. If a placeholder genuinely cannot map, return an empty string (KPI) or empty array (chart).
-
-RULES OF THUMB:
-- Templates with labels like "Sales / Revenue / GMV / Orders" → fill from the dataset's primary numeric column (revenue, sales, amount).
-- Templates with "Customers / Users / Sessions" → fill from a count of unique values or row count.
-- Templates with "% / Rate / Share" → fill as a percentage from the data.
-- Templates with date-axis charts → use a date / month / week column for the x-series.
-
-DO NOT REDESIGN. DO NOT EXPLAIN. English only. JSON only.`;
-
-function escapeHtml(s) {
-  return String(s == null ? '' : s)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+export function sanitiseDesignReference(text) {
+  if (typeof text !== 'string') return '';
+  return text
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<iframe\b[^>]*>[\s\S]*?<\/iframe>/gi, '')
+    .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, '')
+    .replace(/\son\w+\s*=\s*"[^"]*"/gi, '')
+    .replace(/\son\w+\s*=\s*'[^']*'/gi, '')
+    .replace(/javascript:/gi, '')
+    .slice(0, 8000);
 }
 
-function buildSparklineSvg(points, opts = {}) {
-  const w = opts.width  || 300;
-  const h = opts.height || 80;
-  const stroke = opts.stroke || '#6366f1';
-  const arr = Array.isArray(points) ? points : [];
-  if (arr.length < 2) {
-    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="100%" height="100%"><text x="50%" y="50%" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#94a3b8">no data</text></svg>`;
-  }
-  const values = arr.map((p) => Number(p.value) || 0);
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const span = (max - min) || 1;
-  const step = w / (arr.length - 1);
-  const path = values
-    .map((v, i) => `${i === 0 ? 'M' : 'L'}${(i * step).toFixed(1)},${(h - 4 - ((v - min) / span) * (h - 8)).toFixed(1)}`)
-    .join(' ');
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="100%" height="100%" preserveAspectRatio="none"><path d="${path}" stroke="${stroke}" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
-}
+// ── Prompt ─────────────────────────────────────────────────────────────────
 
-/**
- * Replace the inner content of every tagged element with the AI's value.
- * The tag, attributes, and surrounding HTML stay byte-identical.
- */
-function injectIntoHtml(html, kpis, charts) {
-  let out = html;
+const REWRITE_SYSTEM_PROMPT = `You are SheetFlow's Universal Dashboard Rendering AI.
 
-  // KPIs: replace inner text of <tag ... data-kpi="name">…</tag>
-  out = out.replace(KPI_RE, (full, tag, attrs, name) => {
-    if (!Object.prototype.hasOwnProperty.call(kpis, name)) return full;
-    const value = kpis[name];
-    return `<${tag}${attrs}>${escapeHtml(value)}</${tag}>`;
-  });
+INPUT: a TEMPLATE HTML page (any design, any domain) and a DATASET (JSON array, any structure).
 
-  // Charts: replace inner content with an inline SVG sparkline derived from
-  // the AI's data points. The user's CSS / sizing on the wrapper element
-  // applies to the SVG via 100% width/height.
-  out = out.replace(CHART_RE, (full, tag, attrs, name) => {
-    if (!Object.prototype.hasOwnProperty.call(charts, name)) return full;
-    const svg = buildSparklineSvg(charts[name]);
-    return `<${tag}${attrs}>${svg}</${tag}>`;
-  });
+OUTPUT: the FINAL HTML page with real data injected.
 
-  return out;
-}
+RESPONSE FORMAT — STRICT:
+- Respond with ONLY the HTML. No JSON. No prose. No commentary outside the HTML. No code fences.
+- Start with <!DOCTYPE html> (or <html …> if the template starts that way) and END with </html>.
+- IMMEDIATELY AFTER <!DOCTYPE html> (before the <html> tag), insert a changelog HTML comment summarising what you replaced:
+    <!DOCTYPE html>
+    <!-- changed: KPI total files, KPI storage used, chart timeline, chart type distribution, table rows -->
+    <html …>
+  The comment is REQUIRED. Servers reject output that's missing it.
+- The user's browser receives your response verbatim and renders it as the dashboard. The HTML comment is invisible in the browser but is read by our diagnostics.
 
-// ── Full-HTML rewrite mode ──────────────────────────────────────────────────
-//
-// The AI receives the FULL template HTML + sample data and returns the FULL
-// modified HTML with all visible numbers, KPI cards, chart datasets, and
-// table rows replaced with values derived from the data.
-//
-// This is more general than the placeholder path (works on any HTML, even
-// without `data-kpi`/`data-chart` attributes) but is also more expensive
-// (output tokens scale with template size) and more brittle (LLMs can break
-// HTML or refuse to modify). We validate the output and fall back to the
-// placeholder path, then to the original HTML, if rewrite fails.
+ABSOLUTE RULES:
 
-const REWRITE_SCHEMA = {
-  type: 'object',
-  properties: {
-    html: { type: 'string', description: 'The FULL modified HTML, complete and valid.' },
-    changed: {
-      type: 'array',
-      description: 'Short labels of what you changed (for logging). e.g. ["KPI:Total Sales", "chart:weeklyTrend", "table:topProducts"].',
-      items: { type: 'string' },
-    },
-  },
-  required: ['html', 'changed'],
-  additionalProperties: false,
-};
+1. PRESERVE THE UI STRUCTURE EXACTLY:
+   - Keep every HTML tag, attribute (class, id, style, data-*), and DOM structure.
+   - Keep every <style> block and CSS class verbatim — same colors, same spacing, same layout.
+   - Keep every <script> block's logic intact. Inside scripts you may modify ONLY the data arrays (labels:, data:, datasets:) — never function names, library imports, CDN URLs, or any logic.
+   - Do NOT remove sections, cards, or charts.
 
-const REWRITE_SYSTEM_PROMPT = `You inject real business data into an existing dashboard template. You are NOT a designer. You do NOT change layout, CSS, classes, structure, or copy. You ONLY replace visible data values with values derived from the user's spreadsheet.
+2. REPLACE all dummy / static data with REAL VALUES from the dataset.
 
-WHAT TO REPLACE:
-1. Numbers in KPI cards (any visible number with a currency / percent / unit / bare integer / float — e.g. ₹120,000  45%  1,234  98.4ms).
-2. Chart datasets in <script> blocks (Chart.js / ApexCharts / etc.):
-   - "labels": [...] arrays → use real category names or dates from the data.
-   - "data": [...] arrays inside datasets → use real numeric values.
-3. <table> rows: replace cell contents with rows derived from the data (preserve <tr>/<td> structure exactly; only swap text content).
-4. Any other visible text that is clearly a metric / value / count.
+   2a. KPI CARDS — FORCED, every KPI must change.
+       For each KPI card in the template, compute its value using one of these patterns:
+         • Total Records / Count            = count(rows)
+         • Total / Sum / Volume / Storage   = sum(numericColumn)
+         • Average / Avg                    = sum(numericColumn) / count(rows)
+         • Unique / Distinct / Categories   = distinct count of categoricalColumn
+         • Top / Best / Most / Largest      = the single highest-value entry from the relevant column
+         • Min / Smallest                   = the single lowest-value entry
+         • % / Rate / Share                 = (matching rows / total rows) × 100, formatted with %
+       Pick the formula that matches the KPI's visible label (after any domain-adaptation rename). Leaving any KPI card with its dummy template value is INVALID.
 
-WHAT NOT TO TOUCH:
-- HTML tags, attributes (class, id, style, data-*), DOM structure.
-- CSS (inline or in <style> blocks).
-- JavaScript logic, function names, library imports, CDN URLs.
-- Static labels / titles / headings ("Total Sales", "Last 30 days", etc. — these stay).
-- Color values, sizing, fonts.
+   2b. CHART ARRAYS — every chart must update.
+       For Chart.js / ApexCharts / Recharts patterns, find labels: [...] and data: [...] arrays inside <script> blocks and replace ONLY their contents:
+         • labels[] come from a date/category column.
+         • data[] come from a numeric column (sum or count grouped by the label).
+       Keep the chart type, options, colours, and JS logic exactly as the template defines them.
 
-CRITICAL RULES:
-- If your output HTML is identical to the input → YOU FAILED. The input had placeholder numbers; the output MUST have real values from the data.
-- Output MUST be valid HTML, complete, with no truncation. Match the input's <!doctype>, <html>, <head>, <body> structure exactly.
-- Output MUST be roughly the same length as the input (within 80%–130%). Don't summarise, don't strip, don't reformat.
-- If the data doesn't fit a particular field, leave that field's original value rather than inserting nonsense.
+       FALLBACK CHART (mandatory — never leave a chart empty):
+         If the dataset has no numeric column AND no useful categorical/date
+         column to bucket by, fall back to a row-index chart:
+           labels = [1, 2, 3, …, N]  (N = row count, capped at 25)
+           data   = [1, 1, 1, …, 1]  (one per row)
+         This guarantees every chart renders something, never an empty array.
 
-SELF-CHECK BEFORE YOU RETURN:
-- Did I change visible numbers? (must be yes, or "changed" array is empty and you should rewrite)
-- Did I update Chart.js labels and data arrays? (yes, when present)
-- Did I preserve every CSS class, every tag, every script function?
-- Is the output the SAME HTML structure as the input?
+   2c. TABLE — MANDATORY when the dataset has ≥ 5 rows.
+       If the template has a <table> already, fill its <tbody> with at least 5 real rows from the dataset (preserve the <tr>/<td> structure; add or remove <tr> elements as needed to reach 5+ rows).
+       If the template has no <table> but has a section that's clearly a list / feed / "Recent activity" area, convert it into a real list of dataset rows (still preserving the surrounding card / classes / styles).
+       Pick the most informative columns for the visible cells.
 
-RETURN: a JSON object with two fields:
-  "html":    the FULL modified HTML.
-  "changed": short labels listing what you replaced.
+   2d. INLINE TEXT VALUES.
+       Any visible "₹120,000" / "45%" / "1,234" / similar dummy figures in headings, badges, captions → replace with values computed from the data.
 
-No prose outside JSON.`;
+3. ADAPT LABELS TO THE DATASET'S DOMAIN (allowed, encouraged, often REQUIRED):
+   - The TEMPLATE may have been built for a different domain than the dataset. When that happens, you MUST adapt ALL label text and meaning — the UI stays identical, the wording changes completely.
+   - Concrete example: an AIRPORT template + a FILE dataset becomes a File Analytics Dashboard:
+       Flights         → Files
+       Passengers      → Records
+       Revenue         → Storage Used
+       Delays          → Errors
+       On-time %       → Healthy %
+       Top Airline     → Top File Type
+       Departures Trend → Uploads Over Time
+   - More short examples:
+       • Template "Total Sales" + file dataset       → "Total Files"
+       • Template "Revenue"     + user dataset       → "Active Users"
+       • Template "Orders"      + log dataset        → "Total Records"
+       • Template "Customers"   + product dataset    → "Total Products"
+   - Rule: ONLY the visible text content of headings / labels / titles / KPI captions / chart titles / legend labels / table headers changes. Their tags, classes, sizes, colors, positions stay identical.
+
+4. DETECT DATA SHAPE DYNAMICALLY (no hardcoded domain assumptions):
+   - Identify numeric columns (sums, averages, counts) for KPIs.
+   - Identify date/time columns — use as X-axis for trend charts.
+   - Identify categorical columns — use for bar / donut groupings.
+   - The dataset can be sales, finance, inventory, users, logs, files, performance metrics, anything. Never assume a domain.
+
+   COLUMN-NAME INTERPRETATION HINTS (use these to pick the right metric):
+     • "File Size" / "Bytes" / "Storage"        → numeric, summable (Total Storage, Avg File Size).
+     • "Length" / "Duration" / "Runtime"        → duration / numeric (Total Duration, Avg Length).
+     • "Date" / "Created" / "Uploaded" / "When" → timeline axis for trend charts.
+     • "Data Type" / "Category" / "Kind"        → categorical, group by for bar / donut.
+     • "Status" / "State"                       → categorical, often donut for distribution.
+     • "Count" / "#" / "Quantity"               → numeric, summable.
+     • "Rate" / "%" / "Pct"                     → percent, format with %.
+     • "Price" / "Amount" / "Cost" / "Revenue"  → currency, format with currency symbol.
+
+5. NEVER:
+   - Return placeholder text like {{title}} or [VALUE].
+   - Return prose / explanation / commentary outside the HTML.
+   - Wrap the HTML in a JSON object or a code fence.
+   - Truncate or summarise the HTML — output must be a complete, valid HTML page roughly the same length as the input.
+   - Modify CSS classes, colors, spacing, fonts, structure.
+   - Remove or rearrange sections.
+
+6. NO THEMING — STRICT. AI EMITS DATA, NEVER STYLE.
+   The frontend owns the dashboard's mode (light/dark) and any colour /
+   surface styling. Theming is OUT OF YOUR JOB ENTIRELY.
+
+   Your job is exactly four things and nothing else:
+     (1) KPI calculation from the dataset
+     (2) Chart label/data arrays from real columns
+     (3) Table population from real rows
+     (4) Inline-text replacement of dummy figures
+
+   For ANY markup you ADD or MODIFY (table rows, list items, KPI values,
+   replacement inline values, newly-injected card structures):
+
+     ✅ DO use class-based markup that matches the template's existing
+        class names (\`.card\`, \`.value\`, \`.kpi-label\`, etc.) when injecting.
+     ✅ DO keep semantic structure: <h3>, <p>, <table>, <td>, <ul>.
+
+     ❌ DO NOT add inline \`style="..."\` attributes anywhere.
+     ❌ DO NOT write hex colours (#fff, #000, #112233), rgb(), hsl(), or
+        named colours (white, black, slate, etc.) in injected markup.
+     ❌ DO NOT add Tailwind colour utilities (bg-*, text-*, border-*,
+        from-*, to-*, dark:*) in injected markup. CSS classes you inject
+        must be neutral / structural only — colour stays with the theme.
+     ❌ DO NOT set \`background-color\`, \`color\`, \`background\` on <body>
+        or on any element you add. Never style <body> at all.
+     ❌ DO NOT introduce new <style> blocks, new dark-mode toggles, new
+        theme-switching JS, new colour variants, or new CSS variables.
+     ❌ DO NOT emit a "theme" / "mode" / "dark" / "light" field in any
+        adjacent JSON, comment, or data-attribute.
+
+   Rule of thumb for INJECTIONS: write markup like this, structural-only:
+     <div class="card">
+       <h3>Total Records</h3>
+       <div class="value">120</div>
+     </div>
+
+   IMPORTANT separation: Per Rule 1 the template's EXISTING inline styles,
+   <style> blocks, and colour classes stay VERBATIM — you do not strip
+   them. You just don't ADD new ones. Theming is the frontend's domain;
+   data is yours. Strict separation of concerns.
+
+7. DATA PRECISION — STRICT.
+   - Compute values from the actual dataset rows. Do NOT invent numbers, do NOT approximate ranges, do NOT make up plausible-sounding figures.
+   - Sum, average, count, min, max, distinct-count → use real arithmetic on the rows shown to you.
+   - Round to a sensible precision for display (e.g. integers for counts, 1–2 decimals for averages, currency / % formatted with units) — but the underlying value must come from the data.
+   - If the dataset doesn't contain a column that fits a particular KPI / chart slot, leave that slot's original template value rather than fabricating a value. Better an unchanged dummy than a hallucinated number.
+
+MINIMUM CHANGE REQUIREMENT — all four are mandatory:
+- ✔ Replace EVERY KPI card value with a real computed value (per 2a).
+- ✔ Update EVERY chart's labels: [] and data: [] arrays (per 2b).
+- ✔ Add or update a table with ≥ 5 real rows when the dataset has ≥ 5 rows (per 2c).
+- ✔ Replace at least 5 visible inline values total across the document.
+- ✔ Adapt KPI / chart / table / section labels when the template's domain doesn't match the dataset (per rule 3).
+- If any of these is skipped → your output is INVALID. Re-do it before responding.
+
+CRITICAL FAILURE CHECK — read this twice before responding:
+- If your output is byte-identical to the input → YOU FAILED.
+- If you didn't change at least 5 visible values → YOU FAILED.
+- If the <!-- changed: ... --> comment is missing or empty → YOU FAILED.
+
+OUTPUT: the modified HTML page. Starts with <!DOCTYPE html>, then the changelog comment, then <html>. Ends with </html>. Nothing before. Nothing after.`;
 
 function buildDatasetBlock(sheetData) {
   const rows = Array.isArray(sheetData) ? sheetData.slice(0, 25) : [];
@@ -204,10 +216,69 @@ function buildDatasetBlock(sheetData) {
   );
 }
 
+// Per-generation variation seed — so two consecutive runs over the same data
+// produce subtly different dashboards (different chart-type mix within the
+// allowed set, different accent palette, different heading phrasing). The
+// template's CSS classes / layout stay locked; only the content varies.
+function variationDirective() {
+  const HEADINGS = ['Analytics Overview', 'Insights Panel', 'Data Snapshot', 'Performance Pulse', 'Highlights Today'];
+  const ACCENTS  = ['indigo', 'emerald', 'amber', 'rose', 'cyan'];
+  const CHART_MIX = ['line + bar + donut', 'bar + bar + donut', 'area + bar + donut', 'line + bar + area'];
+  const pick = (a) => a[Math.floor(Math.random() * a.length)];
+  return (
+    `\nVARIATION HINT (use these unless the template fixes them):\n` +
+    `  • Page heading tone: "${pick(HEADINGS)}"\n` +
+    `  • Chart-type mix: ${pick(CHART_MIX)}\n` +
+    `  • Accent palette: ${pick(ACCENTS)} (only for stroke/fill colors inside chart data arrays; do NOT change template CSS classes).\n` +
+    `Pick something different from a likely previous run so the user sees the dashboard refresh.\n`
+  );
+}
+
+// ── HTML extraction from the model's free-form text response ───────────────
+
 /**
- * Validate the AI's full-HTML rewrite. Returns a string describing why it
- * failed, or null if it passed.
+ * Pull the HTML out of the model's response. The contract says "respond
+ * with HTML only", but as a defence-in-depth we tolerate:
+ *   - code fences ```html ... ``` or ``` ... ```
+ *   - leading prose before <!DOCTYPE / <html / <body
+ *   - trailing prose after </html>
+ *
+ * Returns the HTML string, or '' if nothing usable found.
  */
+function extractHtml(text) {
+  if (typeof text !== 'string' || !text) return '';
+
+  // Code-fence path
+  const fence = text.match(/```(?:html)?\s*([\s\S]*?)\s*```/i);
+  if (fence) return fence[1].trim();
+
+  // Full document path
+  const doctype = text.match(/<!DOCTYPE[\s\S]*?<\/html\s*>/i);
+  if (doctype) return doctype[0].trim();
+  const htmlTag = text.match(/<html[\s\S]*?<\/html\s*>/i);
+  if (htmlTag) return htmlTag[0].trim();
+
+  // Fragment path: find first '<' to last '>'.
+  const start = text.indexOf('<');
+  const end = text.lastIndexOf('>');
+  if (start !== -1 && end > start) return text.slice(start, end + 1).trim();
+
+  return text.trim();
+}
+
+// Find the AI's `<!-- changed: ... -->` breadcrumb anywhere in the first
+// ~2KB of output. Required by spec — its absence is a failure signal.
+const CHANGELOG_RE = /<!--\s*changed\s*:\s*([\s\S]*?)\s*-->/i;
+
+function extractChangelog(html) {
+  const head = (html || '').slice(0, 2000);
+  const m = head.match(CHANGELOG_RE);
+  if (!m) return null;
+  const body = m[1].trim();
+  return body.length > 0 ? body : null;
+}
+
+/** Return a string describing why the rewrite failed, or null if it passed. */
 function validateRewrite(originalHtml, candidateHtml) {
   if (typeof candidateHtml !== 'string' || !candidateHtml.length) {
     return 'AI returned empty html.';
@@ -216,124 +287,222 @@ function validateRewrite(originalHtml, candidateHtml) {
     return 'AI returned identical HTML — no values were injected.';
   }
   const ratio = candidateHtml.length / originalHtml.length;
-  if (ratio < 0.6) return `Output is too short (${(ratio * 100).toFixed(0)}% of input) — likely truncated or summarised.`;
-  if (ratio > 1.6) return `Output is too long (${(ratio * 100).toFixed(0)}% of input) — likely added unrelated content.`;
-  // Lightweight structural check: tag count should be similar.
+  if (ratio < 0.6) return `Output too short (${(ratio * 100).toFixed(0)}% of input) — likely truncated or summarised.`;
+  if (ratio > 1.6) return `Output too long (${(ratio * 100).toFixed(0)}% of input) — likely added unrelated content.`;
   const inTags = (originalHtml.match(/<\w+/g) || []).length;
   const outTags = (candidateHtml.match(/<\w+/g) || []).length;
   if (Math.abs(outTags - inTags) > Math.max(20, inTags * 0.2)) {
     return `Tag count differs significantly (in ${inTags}, out ${outTags}) — structure may be broken.`;
   }
+  // Required changelog comment — per spec, its absence makes the output invalid.
+  if (!extractChangelog(candidateHtml)) {
+    return 'Missing or empty <!-- changed: ... --> comment at the top of the document.';
+  }
   return null;
 }
 
-async function rewriteHtmlWithData({ templateCode, sheetData }) {
-  // Output token budget — scale with input. ~4 chars/token rule of thumb.
-  // We need at least the input size in output, plus headroom for the JSON
-  // envelope and any expanded values.
+// ── Deterministic injection (no AI) ────────────────────────────────────────
+//
+// Walks the template's `data-kpi="<i>"` / `data-chart="<key>"` / `data-table`
+// markers and fills them with values from the deterministic engine. Also
+// patches Chart.js-style `labels: [...]` / `data: [...]` arrays in script
+// blocks tagged with `data-chart-id="<key>"`. When nothing is tagged, falls
+// back to replacing the first 4 visible big numbers in the document.
+
+function buildKpiSvgPlaceholder() { return ''; }
+
+function buildLineSvgFromArrays(labels, data) {
+  if (!Array.isArray(data) || data.length < 2) return '';
+  const w = 400, h = 160;
+  const min = Math.min(...data);
+  const max = Math.max(...data);
+  const span = (max - min) || 1;
+  const step = (w - 20) / (data.length - 1);
+  const path = data.map((v, i) => `${i === 0 ? 'M' : 'L'}${(10 + i * step).toFixed(1)},${(h - 20 - ((v - min) / span) * (h - 40)).toFixed(1)}`).join(' ');
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="100%" height="100%" preserveAspectRatio="none"><path d="${path}" stroke="#6366f1" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+}
+
+function buildBarSvgFromArrays(labels, data) {
+  if (!Array.isArray(data) || data.length === 0) return '';
+  const w = 400, h = 180;
+  const max = Math.max(...data, 1);
+  const slot = (w - 20) / data.length;
+  const barW = slot * 0.65;
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="100%" height="100%" preserveAspectRatio="none">${
+    data.map((v, i) => {
+      const x = 10 + i * slot + (slot - barW) / 2;
+      const barH = (v / max) * (h - 30);
+      const y = h - 10 - barH;
+      return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${barH.toFixed(1)}" fill="#6366f1" rx="2"/>`;
+    }).join('')
+  }</svg>`;
+}
+
+function buildDonutSvgFromArrays(labels, data) {
+  const total = data.reduce((a, b) => a + (Number(b) || 0), 0) || 1;
+  const palette = ['#6366f1', '#a855f7', '#06b6d4', '#10b981', '#f59e0b', '#94a3b8'];
+  let acc = 0;
+  const segs = data.map((v, i) => {
+    const start = (acc / total) * Math.PI * 2 - Math.PI / 2;
+    acc += Number(v) || 0;
+    const end = (acc / total) * Math.PI * 2 - Math.PI / 2;
+    const large = end - start > Math.PI ? 1 : 0;
+    const cx = 100, cy = 100, r = 75, hole = 40;
+    const x1 = cx + r * Math.cos(start), y1 = cy + r * Math.sin(start);
+    const x2 = cx + r * Math.cos(end),   y2 = cy + r * Math.sin(end);
+    const xi1 = cx + hole * Math.cos(start), yi1 = cy + hole * Math.sin(start);
+    const xi2 = cx + hole * Math.cos(end),   yi2 = cy + hole * Math.sin(end);
+    return `<path d="M ${xi1.toFixed(1)} ${yi1.toFixed(1)} L ${x1.toFixed(1)} ${y1.toFixed(1)} A ${r} ${r} 0 ${large} 1 ${x2.toFixed(1)} ${y2.toFixed(1)} L ${xi2.toFixed(1)} ${yi2.toFixed(1)} A ${hole} ${hole} 0 ${large} 0 ${xi1.toFixed(1)} ${yi1.toFixed(1)} Z" fill="${palette[i % palette.length]}"/>`;
+  }).join('');
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="100%" height="100%">${segs}</svg>`;
+}
+
+function chartSvg(chart) {
+  if (!chart) return '';
+  // Match shape to renderer (line is the safe default).
+  if (chart === computeDashboardData([]).charts.donut) return buildDonutSvgFromArrays(chart.labels, chart.data);
+  return buildLineSvgFromArrays(chart.labels, chart.data);
+}
+
+function escapeHtmlText(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function injectDeterministic(html, data) {
+  let out = html;
+
+  // 1. Fill data-kpi="i" placeholders with the i-th KPI value (0-indexed)
+  //    or by name if data-kpi names a known KPI label.
+  out = out.replace(/<([a-zA-Z][\w-]*)([^<>]*?\sdata-kpi=["']([^"']+)["'][^<>]*?)>([\s\S]*?)<\/\1>/g,
+    (full, tag, attrs, name) => {
+      const idx = /^\d+$/.test(name) ? parseInt(name, 10) : data.kpis.findIndex((k) => k.label?.toLowerCase().includes(name.toLowerCase()));
+      const kpi = idx >= 0 && idx < data.kpis.length ? data.kpis[idx] : data.kpis[0];
+      if (!kpi) return full;
+      return `<${tag}${attrs}>${escapeHtmlText(kpi.value)}</${tag}>`;
+    });
+
+  // 2. Fill data-chart="key" wrappers with an inline SVG.
+  const chartMap = { line: data.charts.line, bar: data.charts.bar, donut: data.charts.donut };
+  out = out.replace(/<([a-zA-Z][\w-]*)([^<>]*?\sdata-chart=["']([^"']+)["'][^<>]*?)>([\s\S]*?)<\/\1>/g,
+    (full, tag, attrs, key) => {
+      const k = key.toLowerCase();
+      let chart = chartMap.line;
+      let svgFn = buildLineSvgFromArrays;
+      if (k.includes('bar') || k.includes('compare') || k.includes('top')) {
+        chart = chartMap.bar; svgFn = buildBarSvgFromArrays;
+      } else if (k.includes('donut') || k.includes('pie') || k.includes('distrib') || k.includes('share')) {
+        chart = chartMap.donut; svgFn = buildDonutSvgFromArrays;
+      }
+      if (!chart) return full;
+      return `<${tag}${attrs}>${svgFn(chart.labels, chart.data)}</${tag}>`;
+    });
+
+  // 3. Patch Chart.js / similar `labels: [...]` and `data: [...]` arrays
+  //    inside <script> blocks. Best-effort — we only replace if both arrays
+  //    are found in proximity (within 200 chars).
+  out = out.replace(/<script\b[\s\S]*?<\/script>/gi, (block) => {
+    let modified = block;
+    const labels = JSON.stringify(data.charts.line.labels);
+    const dataArr = JSON.stringify(data.charts.line.data);
+    modified = modified.replace(/labels\s*:\s*\[[^\]]*\]/, `labels: ${labels}`);
+    modified = modified.replace(/data\s*:\s*\[[^\]]*\]/, `data: ${dataArr}`);
+    return modified;
+  });
+
+  // 4. Fill data-table tbody with real rows.
+  out = out.replace(/<tbody([^<>]*\sdata-table=["'][^"']*["'][^<>]*)>([\s\S]*?)<\/tbody>/g,
+    (full, attrs) => {
+      const rows = data.table.rows.map((row) =>
+        `<tr>${row.map((cell) => `<td>${escapeHtmlText(cell)}</td>`).join('')}</tr>`
+      ).join('');
+      return `<tbody${attrs}>${rows}</tbody>`;
+    });
+
+  return out;
+}
+
+// ── Main entry ─────────────────────────────────────────────────────────────
+
+/**
+ * @param {object} args
+ * @param {string} args.templateCode
+ * @param {Array<object>} args.sheetData
+ * @param {string} [args.userQuery]
+ * @returns {Promise<{ html: string, source: 'ai-rewrite' | 'fallback' }>}
+ */
+export async function applyTemplate({ templateCode, sheetData, userQuery, user }) {
+  if (typeof templateCode !== 'string' || !templateCode) {
+    return { html: '', source: 'fallback' };
+  }
+
+  // ── Deterministic pre-compute ─────────────────────────────────────────
+  // ALWAYS compute KPIs / charts / table from the sheet data. Independent
+  // of the AI. The AI's job becomes "polish the labels" — the values are
+  // already correct. If the AI later fails, we still have a usable
+  // dashboard.
+  const data = computeDashboardData(sheetData);
+  console.log('[template-apply] deterministic engine —',
+    `${data.kpis.length} KPIs,`,
+    `${Object.keys(data.charts).length} charts,`,
+    `${data.table.rows.length} table rows.`);
+
+  if (!isAiAvailable() && !user?.aiKeys?.openai && !user?.aiKeys?.claude) {
+    console.warn('[template-apply] AI unavailable — injecting deterministic values only.');
+    return {
+      html: injectDeterministic(templateCode, data),
+      source: 'deterministic',
+      deterministic: data,
+    };
+  }
+
+  // Output tokens scale with input. ~3 chars/token rule for HTML; floor 4K,
+  // ceiling 32K so very large templates aren't silently truncated.
   const estimatedOutputTokens = Math.min(
-    Math.max(Math.ceil(templateCode.length / 3) + 1000, 4000),
-    32000,  // hard ceiling
+    Math.max(Math.ceil(templateCode.length / 3) + 1500, 4000),
+    32000,
   );
 
-  console.log('AI APPLY (rewrite mode) — template length:', templateCode.length,
+  console.log('AI APPLY (rewrite mode, raw HTML) — template length:', templateCode.length,
+    '| dataset rows:', Array.isArray(sheetData) ? sheetData.length : 0,
     '| max output tokens:', estimatedOutputTokens);
 
   const datasetBlock = buildDatasetBlock(sheetData);
   const userPrompt =
     `TEMPLATE HTML (${templateCode.length} chars):\n${templateCode}\n\n` +
     `${datasetBlock}\n\n` +
-    `Now produce the modified HTML with real values injected. Remember: identical output = failed.`;
+    (userQuery ? `USER REQUEST: ${userQuery}\n\n` : '') +
+    variationDirective() +
+    `Now respond with the modified HTML page. Same UI, same CSS, same structure — only the data (and where allowed, headings/accent) changes. ` +
+    `Identical output = failed. No JSON, no prose, no code fences. Just the HTML, starting at <!DOCTYPE html> or <html> and ending at </html>.`;
 
+  let rawText;
   try {
-    const result = await callStructured({
+    rawText = await callText({
       systemPrompt: REWRITE_SYSTEM_PROMPT,
       userPrompt,
-      schema: REWRITE_SCHEMA,
       maxTokens: estimatedOutputTokens,
+      user,
     });
-    const html = result?.html;
-    const changed = Array.isArray(result?.changed) ? result.changed : [];
-    const reason = validateRewrite(templateCode, html);
-    if (reason) {
-      console.warn('[template-apply] rewrite rejected:', reason);
-      return { html: null, source: null };
-    }
-    console.log('[template-apply] rewrite accepted —',
-      `${changed.length} change${changed.length === 1 ? '' : 's'}:`,
-      changed.slice(0, 8).join(', ') + (changed.length > 8 ? '…' : ''));
-    return { html, source: 'ai-rewrite' };
   } catch (err) {
-    console.warn('[template-apply] rewrite call failed:', err?.message || err);
-    return { html: null, source: null };
-  }
-}
-
-async function applyViaPlaceholders({ templateCode, sheetData, kpiNames, chartNames }) {
-  console.log('AI APPLY (placeholder mode) — template length:', templateCode.length,
-    '| kpi placeholders:', kpiNames.length,
-    '| chart placeholders:', chartNames.length);
-
-  const datasetBlock = buildDatasetBlock(sheetData);
-  const userPrompt =
-    `TEMPLATE HTML:\n${templateCode}\n\n` +
-    `${datasetBlock}\n\n` +
-    `PLACEHOLDERS TO FILL:\n` +
-    `KPIs: ${JSON.stringify(kpiNames)}\n` +
-    `CHARTS: ${JSON.stringify(chartNames)}\n\n` +
-    `Look at where each placeholder is positioned in the template HTML above — its surrounding labels and styles tell you what business value belongs there. Return JSON with "kpis" and "charts" keys, each populated for every name above.`;
-
-  try {
-    const result = await callStructured({
-      systemPrompt: SYSTEM_PROMPT,
-      userPrompt,
-      schema: SCHEMA,
-    });
-    const kpis = result?.kpis && typeof result.kpis === 'object' ? result.kpis : {};
-    const charts = result?.charts && typeof result.charts === 'object' ? result.charts : {};
-    const html = injectIntoHtml(templateCode, kpis, charts);
-    if (html === templateCode) return { html: null, source: null };
-    return { html, source: 'ai-placeholders' };
-  } catch (err) {
-    console.warn('[template-apply] placeholder call failed:', err?.message || err);
-    return { html: null, source: null };
-  }
-}
-
-/**
- * Take a raw-HTML template + sheet data, return the same HTML with real
- * values injected. Tries full rewrite first; falls back to placeholder
- * substitution; finally returns the original template if both AI paths
- * fail. Never throws.
- *
- * @param {object} args
- * @param {string} args.templateCode
- * @param {Array<object>} args.sheetData — sample rows for the AI to reason about
- * @returns {Promise<{ html: string, source: 'ai-rewrite' | 'ai-placeholders' | 'fallback' }>}
- */
-export async function applyTemplate({ templateCode, sheetData }) {
-  if (typeof templateCode !== 'string' || !templateCode) {
-    return { html: '', source: 'fallback' };
-  }
-  if (!isAiAvailable()) {
-    console.warn('[template-apply] AI unavailable — returning template untouched.');
-    return { html: templateCode, source: 'fallback' };
+    console.warn('[template-apply] AI call failed — using deterministic injection:', err?.message || err);
+    return { html: injectDeterministic(templateCode, data), source: 'deterministic', deterministic: data };
   }
 
-  // 1. Primary: full HTML rewrite. Works on any template.
-  const rewrite = await rewriteHtmlWithData({ templateCode, sheetData });
-  if (rewrite.html) return rewrite;
+  const html = extractHtml(rawText);
+  const reason = validateRewrite(templateCode, html);
 
-  // 2. Fallback: explicit data-kpi / data-chart placeholders. Works only
-  //    when the template has them, but it's cheap and deterministic.
-  const { kpis: kpiNames, charts: chartNames } = extractPlaceholders(templateCode);
-  if (kpiNames.length > 0 || chartNames.length > 0) {
-    const placeholders = await applyViaPlaceholders({ templateCode, sheetData, kpiNames, chartNames });
-    if (placeholders.html) return placeholders;
+  if (reason) {
+    console.warn('[template-apply] rewrite REJECTED:', reason,
+      '| raw response length:', (rawText || '').length,
+      '— falling back to deterministic injection.');
+    return { html: injectDeterministic(templateCode, data), source: 'deterministic', deterministic: data };
   }
 
-  // 3. Last resort: return the template untouched so the user at least sees
-  //    their layout. They can refine the prompt or add explicit placeholders.
-  console.warn('[template-apply] all AI paths failed — returning original template.');
-  return { html: templateCode, source: 'fallback' };
+  const changelog = extractChangelog(html);
+  console.log('[template-apply] rewrite ACCEPTED — output length:', html.length,
+    '| input length:', templateCode.length,
+    '| changed:', changelog || '(none)');
+
+  return { html, source: 'ai-rewrite', changelog };
 }

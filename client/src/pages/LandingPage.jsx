@@ -690,6 +690,11 @@ function Pricing() {
         <div className="mt-8 text-center text-xs text-ink-500">
           All plans include unlimited public share links, light/dark mode, and SOC 2 Type II infrastructure.
         </div>
+        <div className="mt-3 text-center text-sm">
+          <Link to="/pricing" className="text-brand-600 hover:text-brand-700 font-semibold">
+            See live pricing →
+          </Link>
+        </div>
       </div>
     </section>
   );

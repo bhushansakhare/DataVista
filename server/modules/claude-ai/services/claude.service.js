@@ -15,18 +15,48 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
+import { decryptSecret } from '../../../utils/crypto.js';
 
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-opus-4-7';
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 const MAX_TOKENS = 16000;
+
+/**
+ * Resolve the API key for a given provider, preferring the user's
+ * encrypted key over the server-wide env var. Decryption returns '' on
+ * failure so we fall back cleanly.
+ *
+ * @param {'openai'|'claude'} provider
+ * @param {object} [user] — Mongoose User doc with .aiKeys
+ */
+export function resolveApiKey(provider, user) {
+  const encrypted = user?.aiKeys?.[provider];
+  if (encrypted) {
+    const decoded = decryptSecret(encrypted);
+    if (decoded) return decoded;
+  }
+  if (provider === 'openai') return process.env.OPENAI_API_KEY || '';
+  if (provider === 'claude') return process.env.ANTHROPIC_API_KEY || '';
+  return '';
+}
+
+/**
+ * Truthy when the caller has their OWN AI key configured. Env-level keys are
+ * NOT counted — per the multi-tenant rule "no shared admin key usage". This
+ * is what gates the AI routes / UI.
+ */
+export function userHasAiAccess(user) {
+  return Boolean(user?.aiKeys?.openai || user?.aiKeys?.claude);
+}
 
 // ───────────────────────────────────────────────────────────────────────────
 // Lazy clients — construct on first use so the module is importable even when
 // keys are missing.
 // ───────────────────────────────────────────────────────────────────────────
 
+// Lazy global clients — used when no user-specific key is available.
 let _anthropic = null;
-function getAnthropic() {
+function getGlobalAnthropic() {
   if (_anthropic) return _anthropic;
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) return null;
@@ -35,11 +65,23 @@ function getAnthropic() {
 }
 
 let _openai = null;
-function getOpenAI() {
+function getGlobalOpenAI() {
   if (_openai) return _openai;
   if (!process.env.OPENAI_API_KEY) return null;
   _openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   return _openai;
+}
+
+/** Per-user client construction — fresh SDK instance per request. Cheap. */
+function getAnthropic(user) {
+  const userKey = user?.aiKeys?.claude ? decryptSecret(user.aiKeys.claude) : '';
+  if (userKey) return new Anthropic({ apiKey: userKey });
+  return getGlobalAnthropic();
+}
+function getOpenAI(user) {
+  const userKey = user?.aiKeys?.openai ? decryptSecret(user.aiKeys.openai) : '';
+  if (userKey) return new OpenAI({ apiKey: userKey });
+  return getGlobalOpenAI();
 }
 
 /**
@@ -54,22 +96,23 @@ function getOpenAI() {
  *
  * null means no provider is available — caller should fall back to heuristics.
  */
-function resolveProvider(override) {
+function resolveProvider(override, user) {
   if (override === 'openai' || override === 'claude') return override;
 
   const env = String(process.env.AI_PROVIDER || 'auto').toLowerCase();
-
   if (env === 'openai') return 'openai';
   if (env === 'claude') return 'claude';
 
   if (env === 'auto') {
-    if (process.env.ANTHROPIC_API_KEY) return 'claude';
-    if (process.env.OPENAI_API_KEY) return 'openai';
+    // Prefer the provider the user has a key for. If they have both,
+    // Claude wins (consistent with the existing global default).
+    if (resolveApiKey('claude', user)) return 'claude';
+    if (resolveApiKey('openai', user)) return 'openai';
   }
-
   return null;
 }
 
+/** Server-wide availability — does the SaaS have any key at all? */
 export function isAiAvailable() {
   return Boolean(
     process.env.ANTHROPIC_API_KEY ||
@@ -94,18 +137,21 @@ export function isAiAvailable() {
  * @param {number} [args.maxTokens]  — Override the default output cap. Use for calls that return large payloads (e.g. full-HTML rewrites).
  * @returns {Promise<object>}        — Parsed JSON.
  */
-export async function callStructured({ systemPrompt, userPrompt, schema, provider, freeForm, maxTokens }) {
-  const finalProvider = resolveProvider(provider);
-  console.log('AI PROVIDER USED:', finalProvider || 'none', freeForm && finalProvider === 'claude' ? '(free-thinking mode)' : '');
+export async function callStructured({ systemPrompt, userPrompt, schema, provider, freeForm, maxTokens, user }) {
+  const finalProvider = resolveProvider(provider, user);
+  const keyOrigin = user?.aiKeys?.[finalProvider] ? 'user' : 'env';
+  console.log('AI PROVIDER USED:', finalProvider || 'none',
+    freeForm && finalProvider === 'claude' ? '(free-thinking mode)' : '',
+    `[${keyOrigin} key]`);
 
   if (!finalProvider) {
-    const e = new Error('No AI provider is configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY.');
+    const e = new Error('No AI provider is configured. Add a key in Settings.');
     e.code = 'ai_unavailable';
     throw e;
   }
 
-  if (finalProvider === 'claude') return callClaude({ systemPrompt, userPrompt, schema, freeForm, maxTokens });
-  if (finalProvider === 'openai') return callOpenAI({ systemPrompt, userPrompt, schema, maxTokens });
+  if (finalProvider === 'claude') return callClaude({ systemPrompt, userPrompt, schema, freeForm, maxTokens, user });
+  if (finalProvider === 'openai') return callOpenAI({ systemPrompt, userPrompt, schema, maxTokens, user });
 
   const e = new Error(`Unknown AI provider: ${finalProvider}`);
   e.code = 'ai_unavailable';
@@ -114,8 +160,8 @@ export async function callStructured({ systemPrompt, userPrompt, schema, provide
 
 // ── Claude ─────────────────────────────────────────────────────────────────
 
-async function callClaude({ systemPrompt, userPrompt, schema, freeForm, maxTokens }) {
-  const client = getAnthropic();
+async function callClaude({ systemPrompt, userPrompt, schema, freeForm, maxTokens, user }) {
+  const client = getAnthropic(user);
   if (!client) {
     const e = new Error('Claude AI is not configured. Set ANTHROPIC_API_KEY.');
     e.code = 'ai_unavailable';
@@ -190,8 +236,8 @@ function extractJson(text) {
 
 // ── OpenAI ─────────────────────────────────────────────────────────────────
 
-async function callOpenAI({ systemPrompt, userPrompt, maxTokens }) {
-  const openai = getOpenAI();
+async function callOpenAI({ systemPrompt, userPrompt, maxTokens, user }) {
+  const openai = getOpenAI(user);
   if (!openai) {
     const e = new Error('OpenAI is not configured. Set OPENAI_API_KEY.');
     e.code = 'ai_unavailable';
@@ -227,6 +273,78 @@ async function callOpenAI({ systemPrompt, userPrompt, maxTokens }) {
 // ───────────────────────────────────────────────────────────────────────────
 // Shared helper.
 // ───────────────────────────────────────────────────────────────────────────
+
+// ───────────────────────────────────────────────────────────────────────────
+// Raw text call. Returns the model's response as a plain string. Used when
+// the caller wants HTML / Markdown / etc. directly, not a structured JSON
+// envelope. Both providers respond in plain text mode (no json_object,
+// no json_schema).
+// ───────────────────────────────────────────────────────────────────────────
+
+export async function callText({ systemPrompt, userPrompt, provider, maxTokens, user }) {
+  const finalProvider = resolveProvider(provider, user);
+  const keyOrigin = user?.aiKeys?.[finalProvider] ? 'user' : 'env';
+  console.log('AI PROVIDER USED:', finalProvider || 'none', '(text mode)', `[${keyOrigin} key]`);
+
+  if (!finalProvider) {
+    const e = new Error('No AI provider is configured. Add a key in Settings.');
+    e.code = 'ai_unavailable';
+    throw e;
+  }
+
+  if (finalProvider === 'claude') {
+    const client = getAnthropic(user);
+    if (!client) {
+      const e = new Error('Claude AI is not configured.');
+      e.code = 'ai_unavailable';
+      throw e;
+    }
+    const response = await client.messages.create({
+      model: CLAUDE_MODEL,
+      max_tokens: Number.isFinite(maxTokens) && maxTokens > 0 ? maxTokens : MAX_TOKENS,
+      thinking: { type: 'adaptive' },
+      system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
+      messages: [{ role: 'user', content: userPrompt }],
+      // No output_config → free-form text response.
+    });
+    const textBlock = response.content.find((b) => b.type === 'text');
+    if (!textBlock || typeof textBlock.text !== 'string') {
+      const e = new Error('Claude returned no text content.');
+      e.code = 'ai_empty_response';
+      throw e;
+    }
+    return textBlock.text;
+  }
+
+  if (finalProvider === 'openai') {
+    const openai = getOpenAI(user);
+    if (!openai) {
+      const e = new Error('OpenAI is not configured.');
+      e.code = 'ai_unavailable';
+      throw e;
+    }
+    const res = await openai.chat.completions.create({
+      model: OPENAI_MODEL,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+      ...(Number.isFinite(maxTokens) && maxTokens > 0 ? { max_tokens: maxTokens } : {}),
+      // No response_format → plain text completion.
+    });
+    const text = res.choices?.[0]?.message?.content;
+    if (typeof text !== 'string') {
+      const e = new Error('OpenAI returned no text content.');
+      e.code = 'ai_empty_response';
+      throw e;
+    }
+    return text;
+  }
+
+  const e = new Error(`Unknown AI provider: ${finalProvider}`);
+  e.code = 'ai_unavailable';
+  throw e;
+}
 
 /** Compact a sheet-shaped payload into a token-efficient sample for the prompt. */
 export function buildDatasetBlock(sheetData) {

@@ -383,6 +383,7 @@ export async function applyTemplateRoute(req, res, next) {
     const { html, source } = await applyHtmlTemplate({
       templateCode: tpl.templateCode,
       sheetData: sheet.rawData || [],
+      user: req.user,
     });
 
     res.json({

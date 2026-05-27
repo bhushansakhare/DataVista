@@ -1,5 +1,6 @@
 import { callStructured, buildDatasetBlock, isAiAvailable } from './claude.service.js';
 import { DASHBOARD_SYSTEM_PROMPT } from '../prompts/dashboard.prompt.js';
+import { computeDashboardData } from '../../templates/deterministicEngine.js';
 
 // AI-driven dashboard generator (v4 — column-reference architecture).
 //
@@ -14,12 +15,13 @@ import { DASHBOARD_SYSTEM_PROMPT } from '../prompts/dashboard.prompt.js';
 // Validation is structural only (handled by `callStructured`). The backend
 // does NOT clamp, normalise, or reshape the AI's response.
 
+// AI emits DATA ONLY — no theme, no mode, no colour, no styling. The
+// frontend owns appearance entirely.
 const DASHBOARD_SCHEMA = {
   type: 'object',
   properties: {
     title:   { type: 'string' },
     summary: { type: 'string' },
-    theme:   { type: 'string', enum: ['dark', 'light'] },
 
     kpis: {
       type: 'array',
@@ -56,7 +58,7 @@ const DASHBOARD_SCHEMA = {
 
     insights: { type: 'array', items: { type: 'string' } },
   },
-  required: ['title', 'summary', 'theme', 'kpis', 'charts', 'insights'],
+  required: ['title', 'summary', 'kpis', 'charts', 'insights'],
   additionalProperties: false,
 };
 
@@ -144,12 +146,13 @@ function buildUserPrompt({ datasetBlock, queryLine, provider }) {
  * @param {string} [args.provider] — 'openai' | 'claude' (from UI). If absent, env / auto resolution applies.
  * @param {object} [args.template]  — pre-resolved template (built-in or user-created). When set, the AI fills its slots instead of designing freely. Caller is responsible for the registry/DB lookup.
  */
-export async function generateDashboard({ sheetData, userQuery, provider, template } = {}) {
-  if (!isAiAvailable()) {
+export async function generateDashboard({ sheetData, userQuery, provider, template, user } = {}) {
+  if (!isAiAvailable() && !user?.aiKeys?.openai && !user?.aiKeys?.claude) {
     const e = new Error('No AI provider is configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY.');
     e.code = 'ai_unavailable';
     throw e;
   }
+
   const datasetBlock = buildDatasetBlock(sheetData);
   const queryLine = userQuery
     ? `\nUSER QUERY: ${userQuery}`
@@ -164,15 +167,21 @@ export async function generateDashboard({ sheetData, userQuery, provider, templa
     userPrompt,
     schema: DASHBOARD_SCHEMA,
     provider,
+    user,
   });
+
+  // Attach deterministically-computed KPIs/charts/table so the client can
+  // ignore AI numbers if it chooses — values always come from real rows.
+  // deterministicEngine never returns empty (line/bar/donut have a row-index
+  // fallback baked in).
+  const deterministic = computeDashboardData(sheetData);
+
   return {
     ...result,
     source: provider || process.env.AI_PROVIDER || 'auto',
     templateId: template?.id || null,
-    // Surface the template's layout + style so the client can apply them
-    // immediately in the preview AND persist the snapshot when the user
-    // clicks Use this dashboard.
     layoutType: template?.layoutType || (template?.layoutConfig?.layout) || null,
     styleConfig: template?.styleConfig || null,
+    deterministic,
   };
 }
